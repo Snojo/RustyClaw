@@ -185,14 +185,52 @@ pub fn run_onboard_wizard(
     };
 
     // ── 4. Select a model ──────────────────────────────────────────
-    let model: String = if provider.models.is_empty() {
-        // Custom provider — ask for a model name.
+
+    // Try to dynamically fetch models from the provider API.
+    let api_key = provider.secret_key
+        .and_then(|sk| secrets.get_secret(sk, true).ok().flatten());
+
+    let fetched_models: Vec<String> = {
+        let handle = tokio::runtime::Handle::current();
+        let base_ref = if base_url.is_empty() { None } else { Some(base_url.as_str()) };
+        print!("  {} Fetching available models…", t::muted("⠋"));
+        io::stdout().flush()?;
+        let result = tokio::task::block_in_place(|| {
+            handle.block_on(crate::providers::fetch_models(
+                provider.id,
+                api_key.as_deref(),
+                base_ref,
+            ))
+        });
+        // Clear the spinner line
+        print!("\r{}\r", " ".repeat(50));
+        io::stdout().flush()?;
+        match result {
+            Ok(models) => {
+                println!("  {}", t::icon_ok(&format!(
+                    "Loaded {} models from {} API.", models.len(), provider.display,
+                )));
+                models
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+
+    // Use fetched models if available, otherwise fall back to static list.
+    let available_models: Vec<String> = if !fetched_models.is_empty() {
+        fetched_models
+    } else {
+        provider.models.iter().map(|s| s.to_string()).collect()
+    };
+
+    let model: String = if available_models.is_empty() {
+        // No models available — ask for a model name.
         let m = prompt_line(&mut reader, &format!("{} ", t::accent("Model name:")))?;
         m.trim().to_string()
     } else {
         println!("{}", t::heading("Select a default model:"));
         println!();
-        for (i, m) in provider.models.iter().enumerate() {
+        for (i, m) in available_models.iter().enumerate() {
             println!("  {}. {}", t::accent_bright(&format!("{}", i + 1)), m);
         }
         println!();
@@ -200,16 +238,16 @@ pub fn run_onboard_wizard(
         loop {
             let choice = prompt_line(
                 &mut reader,
-                &format!("{} ", t::accent(&format!("Model [1-{}]:", provider.models.len()))),
+                &format!("{} ", t::accent(&format!("Model [1-{}]:", available_models.len()))),
             )?;
             if let Ok(n) = choice.trim().parse::<usize>() {
-                if n >= 1 && n <= provider.models.len() {
-                    break provider.models[n - 1].to_string();
+                if n >= 1 && n <= available_models.len() {
+                    break available_models[n - 1].clone();
                 }
             }
             println!(
                 "  {}",
-                t::warn(&format!("Please enter a number between 1 and {}.", provider.models.len()))
+                t::warn(&format!("Please enter a number between 1 and {}.", available_models.len()))
             );
         }
     };
