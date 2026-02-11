@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod gateway;
 pub mod messenger;
+pub mod onboard;
 pub mod pages;
 pub mod panes;
 pub mod secrets;

@@ -3,6 +3,16 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProvider {
+    /// Provider id (e.g. "anthropic", "openai", "google", "ollama", "custom")
+    pub provider: String,
+    /// Default model name (e.g. "claude-sonnet-4-20250514")
+    pub model: Option<String>,
+    /// API base URL (only required for custom/proxy providers)
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// OpenClaw-compatible settings directory
     pub settings_dir: PathBuf,
@@ -17,6 +27,9 @@ pub struct Config {
     /// Gateway WebSocket URL for the TUI to connect to
     #[serde(default)]
     pub gateway_url: Option<String>,
+    /// Selected model provider and default model
+    #[serde(default)]
+    pub model: Option<ModelProvider>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +49,7 @@ impl Default for Config {
             messengers: Vec::new(),
             use_secrets: true,
             gateway_url: None,
+            model: None,
         }
     }
 }

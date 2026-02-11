@@ -34,6 +34,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "clear",
     "enable-access",
     "disable-access",
+    "onboard",
     "reload-skills",
     "gateway",
     "gateway start",
@@ -68,6 +69,7 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 "  /clear                   - Clear messages".to_string(),
                 "  /enable-access           - Enable agent access to secrets".to_string(),
                 "  /disable-access          - Disable agent access to secrets".to_string(),
+                "  /onboard                 - Run setup wizard (use CLI: rustyclaw onboard)".to_string(),
                 "  /reload-skills           - Reload skills".to_string(),
                 "  /gateway                 - Show gateway connection status".to_string(),
                 "  /gateway start           - Connect to the gateway".to_string(),
@@ -107,6 +109,13 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 messages: vec![format!("Error reloading skills: {}", err)],
                 action: CommandAction::None,
             },
+        },
+        "onboard" => CommandResponse {
+            messages: vec![
+                "The onboard wizard is an interactive CLI command.".to_string(),
+                "Run it from your terminal:  rustyclaw onboard".to_string(),
+            ],
+            action: CommandAction::None,
         },
         "gateway" => match parts.get(1).copied() {
             Some("start") => CommandResponse {

@@ -70,11 +70,21 @@ impl Pane for ConfigPane {
             .get_content()
             .unwrap_or("No SOUL content loaded");
 
+        let model_info = match &state.config.model {
+            Some(m) => format!(
+                "Provider: {}  Model: {}",
+                m.provider,
+                m.model.as_deref().unwrap_or("(none)")
+            ),
+            None => "(not configured — run `rustyclaw onboard`)".to_string(),
+        };
+
         let text = [
             format!(
                 "Settings Directory: {}",
                 state.config.settings_dir.display()
             ),
+            format!("Model: {}", model_info),
             format!("SOUL Path: {}", state.soul_manager.get_path().display()),
             format!("Use Secrets: {}", state.config.use_secrets),
             String::new(),

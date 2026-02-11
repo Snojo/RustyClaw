@@ -5,6 +5,7 @@ use rustyclaw::app::App;
 use rustyclaw::args::CommonArgs;
 use rustyclaw::commands::{handle_command, CommandAction, CommandContext};
 use rustyclaw::config::Config;
+use rustyclaw::onboard::run_onboard_wizard;
 use rustyclaw::secrets::SecretsManager;
 use rustyclaw::skills::SkillManager;
 use tokio_tungstenite::tungstenite::Message;
@@ -21,10 +22,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Interactive setup wizard — select provider, model, and initialise the soul
+    Onboard(OnboardArgs),
     #[command(alias = "ui")]
     Tui(TuiArgs),
     #[command(alias = "cmd", alias = "run")]
     Command(CommandArgs),
+}
+
+#[derive(Debug, Args, Default)]
+struct OnboardArgs {
+    /// Reset all configuration before onboarding
+    #[arg(long)]
+    reset: bool,
 }
 
 #[derive(Debug, Args, Default)]
@@ -49,6 +59,10 @@ async fn main() -> Result<()> {
     cli.common.apply_overrides(&mut config);
 
     match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
+        Commands::Onboard(args) => {
+            let mut secrets = SecretsManager::new(&config.settings_dir);
+            run_onboard_wizard(&mut config, &mut secrets, args.reset)?;
+        }
         Commands::Tui(_) => {
             let mut app = App::new(config)?;
             app.run().await?;
