@@ -40,6 +40,10 @@ pub enum Action {
     GatewayDisconnected(String),
     /// Toggle the skills dialog overlay
     ShowSkills,
+    /// Show the provider-selection dialog
+    ShowProviderSelector,
+    /// Set the active provider (triggers auth check + model fetch)
+    SetProvider(String),
     /// Open the API-key input dialog for the given provider
     PromptApiKey(String),
     /// The user entered an API key in the dialog — proceed to store confirmation

@@ -60,6 +60,16 @@ struct ModelSelectorState {
     scroll_offset: usize,
 }
 
+/// State for the provider-selector dialog overlay.
+struct ProviderSelectorState {
+    /// Provider entries: (id, display)
+    providers: Vec<(String, String)>,
+    /// Currently highlighted index
+    selected: usize,
+    /// Scroll offset
+    scroll_offset: usize,
+}
+
 /// Shared state that is separate from the UI components so we can borrow both
 /// independently.
 struct SharedState {
@@ -118,6 +128,8 @@ pub struct App {
     fetch_loading: Option<FetchModelsLoading>,
     /// Loading spinner shown during device flow authentication
     device_flow_loading: Option<FetchModelsLoading>,
+    /// Provider-selector dialog state
+    provider_selector: Option<ProviderSelectorState>,
 }
 
 /// State for the API-key input dialog overlay.
@@ -200,6 +212,7 @@ impl App {
             model_selector: None,
             fetch_loading: None,
             device_flow_loading: None,
+            provider_selector: None,
         })
     }
 
@@ -255,6 +268,15 @@ impl App {
                         if self.api_key_dialog.is_some() {
                             if let Event::Key(key) = &event {
                                 let action = self.handle_api_key_dialog_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        }
+                        // If the provider selector is open, intercept keys for it
+                        else if self.provider_selector.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_provider_selector_key(key.code);
                                 Some(action)
                             } else {
                                 None
@@ -408,6 +430,77 @@ impl App {
             }
             Action::ShowSkills => {
                 self.show_skills_dialog = !self.show_skills_dialog;
+                return Ok(None);
+            }
+            Action::ShowProviderSelector => {
+                self.open_provider_selector();
+                return Ok(None);
+            }
+            Action::SetProvider(ref provider) => {
+                let provider = provider.clone();
+                // Save provider to config
+                let model_cfg = self.state.config.model.get_or_insert_with(|| {
+                    crate::config::ModelProvider {
+                        provider: String::new(),
+                        model: None,
+                        base_url: None,
+                    }
+                });
+                model_cfg.provider = provider.clone();
+                if let Some(url) = providers::base_url_for_provider(&provider) {
+                    model_cfg.base_url = Some(url.to_string());
+                }
+                if let Err(e) = self.state.config.save(None) {
+                    self.state.messages.push(format!("Failed to save config: {}", e));
+                } else {
+                    self.state.messages.push(format!("Provider set to {}.", provider));
+                }
+                // Check auth method and proceed accordingly
+                let def = providers::provider_by_id(&provider);
+                let auth_method = def.map(|d| d.auth_method)
+                    .unwrap_or(providers::AuthMethod::ApiKey);
+
+                match auth_method {
+                    providers::AuthMethod::DeviceFlow => {
+                        if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
+                            match self.state.secrets_manager.get_secret(secret_key, true) {
+                                Ok(Some(_)) => {
+                                    self.state.messages.push(format!(
+                                        "✓ Access token for {} is already stored.",
+                                        providers::display_name_for_provider(&provider),
+                                    ));
+                                    return Ok(Some(Action::FetchModels(provider)));
+                                }
+                                _ => {
+                                    return Ok(Some(Action::StartDeviceFlow(provider)));
+                                }
+                            }
+                        }
+                    }
+                    providers::AuthMethod::ApiKey => {
+                        if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
+                            match self.state.secrets_manager.get_secret(secret_key, true) {
+                                Ok(Some(_)) => {
+                                    self.state.messages.push(format!(
+                                        "✓ API key for {} is already stored.",
+                                        providers::display_name_for_provider(&provider),
+                                    ));
+                                    return Ok(Some(Action::FetchModels(provider)));
+                                }
+                                _ => {
+                                    return Ok(Some(Action::PromptApiKey(provider)));
+                                }
+                            }
+                        }
+                    }
+                    providers::AuthMethod::None => {
+                        self.state.messages.push(format!(
+                            "{} does not require authentication.",
+                            providers::display_name_for_provider(&provider),
+                        ));
+                        return Ok(Some(Action::FetchModels(provider)));
+                    }
+                }
                 return Ok(None);
             }
             Action::PromptApiKey(ref provider) => {
@@ -567,71 +660,7 @@ impl App {
                     for msg in &response.messages {
                         self.state.messages.push(msg.clone());
                     }
-                    let model_cfg = self.state.config.model.get_or_insert_with(|| {
-                        crate::config::ModelProvider {
-                            provider: String::new(),
-                            model: None,
-                            base_url: None,
-                        }
-                    });
-                    model_cfg.provider = provider.clone();
-                    // Set the default base_url for the provider
-                    if let Some(url) = providers::base_url_for_provider(provider) {
-                        model_cfg.base_url = Some(url.to_string());
-                    }
-                    if let Err(e) = self.state.config.save(None) {
-                        self.state.messages.push(format!("Failed to save config: {}", e));
-                    } else {
-                        self.state.messages.push(format!("Provider set to {}.", provider));
-                    }
-
-                    // Check the provider's auth method
-                    let def = providers::provider_by_id(provider);
-                    let auth_method = def.map(|d| d.auth_method)
-                        .unwrap_or(providers::AuthMethod::ApiKey);
-
-                    match auth_method {
-                        providers::AuthMethod::DeviceFlow => {
-                            // Check if we already have a token stored
-                            if let Some(secret_key) = providers::secret_key_for_provider(provider) {
-                                match self.state.secrets_manager.get_secret(secret_key, true) {
-                                    Ok(Some(_)) => {
-                                        self.state.messages.push(format!(
-                                            "✓ Access token for {} is already stored.",
-                                            providers::display_name_for_provider(provider),
-                                        ));
-                                        return Ok(Some(Action::FetchModels(provider.clone())));
-                                    }
-                                    _ => {
-                                        return Ok(Some(Action::StartDeviceFlow(provider.clone())));
-                                    }
-                                }
-                            }
-                        }
-                        providers::AuthMethod::ApiKey => {
-                            if let Some(secret_key) = providers::secret_key_for_provider(provider) {
-                                match self.state.secrets_manager.get_secret(secret_key, true) {
-                                    Ok(Some(_)) => {
-                                        self.state.messages.push(format!(
-                                            "✓ API key for {} is already stored.",
-                                            providers::display_name_for_provider(provider),
-                                        ));
-                                        return Ok(Some(Action::FetchModels(provider.clone())));
-                                    }
-                                    _ => {
-                                        return Ok(Some(Action::PromptApiKey(provider.clone())));
-                                    }
-                                }
-                            }
-                        }
-                        providers::AuthMethod::None => {
-                            self.state.messages.push(format!(
-                                "{} does not require authentication.",
-                                providers::display_name_for_provider(provider),
-                            ));
-                            return Ok(Some(Action::FetchModels(provider.clone())));
-                        }
-                    }
+                    return Ok(Some(Action::SetProvider(provider.clone())));
                 }
                 CommandAction::SetModel(ref model) => {
                     for msg in &response.messages {
@@ -653,6 +682,9 @@ impl App {
                 }
                 CommandAction::ShowSkills => {
                     return Ok(Some(Action::ShowSkills));
+                }
+                CommandAction::ShowProviderSelector => {
+                    return Ok(Some(Action::ShowProviderSelector));
                 }
                 CommandAction::None => {
                     for msg in response.messages {
@@ -893,6 +925,11 @@ impl App {
             // API key dialog overlay
             if let Some(ref dialog) = self.api_key_dialog {
                 Self::draw_api_key_dialog(frame, area, dialog);
+            }
+
+            // Provider selector dialog overlay
+            if let Some(ref selector) = self.provider_selector {
+                Self::draw_provider_selector_dialog(frame, area, selector);
             }
 
             // Model selector dialog overlay
@@ -1535,6 +1572,185 @@ impl App {
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, Style::default().fg(tp::ACCENT)),
                     Span::styled(model.as_str(), style),
+                ]))
+            })
+            .collect();
+
+        let list =
+            List::new(items).style(Style::default().fg(tp::TEXT));
+
+        frame.render_widget(list, inner);
+    }
+
+    // ── Provider selector dialog ──────────────────────────────
+
+    /// Open the provider-selector dialog populated from the shared
+    /// provider registry.
+    fn open_provider_selector(&mut self) {
+        let providers: Vec<(String, String)> = providers::PROVIDERS
+            .iter()
+            .map(|p| (p.id.to_string(), p.display.to_string()))
+            .collect();
+        self.provider_selector = Some(ProviderSelectorState {
+            providers,
+            selected: 0,
+            scroll_offset: 0,
+        });
+    }
+
+    /// Handle key events when the provider selector dialog is open.
+    fn handle_provider_selector_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+    ) -> Action {
+        use crossterm::event::KeyCode;
+
+        let Some(mut sel) = self.provider_selector.take() else {
+            return Action::Noop;
+        };
+
+        const MAX_VISIBLE: usize = 14;
+
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state
+                    .messages
+                    .push("Provider selection cancelled.".to_string());
+                return Action::Noop;
+            }
+            KeyCode::Enter => {
+                if let Some((id, display)) =
+                    sel.providers.get(sel.selected).cloned()
+                {
+                    self.state.messages.push(format!(
+                        "Switching provider to {}\u{2026}",
+                        display,
+                    ));
+                    return Action::SetProvider(id);
+                }
+                return Action::Noop;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if sel.selected > 0 {
+                    sel.selected -= 1;
+                    if sel.selected < sel.scroll_offset {
+                        sel.scroll_offset = sel.selected;
+                    }
+                }
+                self.provider_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if sel.selected + 1 < sel.providers.len() {
+                    sel.selected += 1;
+                    if sel.selected >= sel.scroll_offset + MAX_VISIBLE {
+                        sel.scroll_offset =
+                            sel.selected - MAX_VISIBLE + 1;
+                    }
+                }
+                self.provider_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::Home => {
+                sel.selected = 0;
+                sel.scroll_offset = 0;
+                self.provider_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::End => {
+                sel.selected =
+                    sel.providers.len().saturating_sub(1);
+                sel.scroll_offset =
+                    sel.providers.len().saturating_sub(MAX_VISIBLE);
+                self.provider_selector = Some(sel);
+                return Action::Noop;
+            }
+            _ => {
+                self.provider_selector = Some(sel);
+                return Action::Noop;
+            }
+        }
+    }
+
+    /// Draw a centered provider-selector dialog overlay.
+    fn draw_provider_selector_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        sel: &ProviderSelectorState,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{
+            Block, Borders, Clear, List, ListItem,
+        };
+
+        const MAX_VISIBLE: usize = 14;
+
+        let dialog_w = 50.min(area.width.saturating_sub(4));
+        let visible_count = sel.providers.len().min(MAX_VISIBLE);
+        let dialog_h = ((visible_count as u16) + 4)
+            .min(area.height.saturating_sub(4))
+            .max(6);
+        let x =
+            area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y =
+            area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let title = " Select a provider ";
+        let hint = if sel.providers.len() > MAX_VISIBLE {
+            format!(
+                " {}/{} · ↑↓ navigate · Enter select · Esc cancel ",
+                sel.selected + 1,
+                sel.providers.len(),
+            )
+        } else {
+            " ↑↓ navigate · Enter select · Esc cancel ".to_string()
+        };
+
+        let block = Block::default()
+            .title(Span::styled(title, tp::title_focused()))
+            .title_bottom(
+                Line::from(Span::styled(
+                    &hint,
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let end = (sel.scroll_offset + MAX_VISIBLE)
+            .min(sel.providers.len());
+        let visible = &sel.providers[sel.scroll_offset..end];
+
+        let items: Vec<ListItem> = visible
+            .iter()
+            .enumerate()
+            .map(|(i, (_id, display))| {
+                let abs_idx = sel.scroll_offset + i;
+                let is_selected = abs_idx == sel.selected;
+                let (marker, style) = if is_selected {
+                    (
+                        "❯ ",
+                        Style::default()
+                            .fg(tp::ACCENT_BRIGHT)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("  ", Style::default().fg(tp::TEXT))
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        marker,
+                        Style::default().fg(tp::ACCENT),
+                    ),
+                    Span::styled(display.as_str(), style),
                 ]))
             })
             .collect();

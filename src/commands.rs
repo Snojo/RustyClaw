@@ -21,6 +21,8 @@ pub enum CommandAction {
     SetModel(String),
     /// Show skills dialog
     ShowSkills,
+    /// Show the provider selector dialog
+    ShowProviderSelector,
 }
 
 #[derive(Debug, Clone)]
@@ -176,13 +178,9 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 }
             }
             None => {
-                let list = providers::provider_ids().join(", ");
                 CommandResponse {
-                    messages: vec![
-                        "Usage: /provider <name>".to_string(),
-                        format!("Known providers: {}", list),
-                    ],
-                    action: CommandAction::None,
+                    messages: Vec::new(),
+                    action: CommandAction::ShowProviderSelector,
                 }
             }
         },
