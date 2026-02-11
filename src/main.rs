@@ -359,6 +359,9 @@ enum SkillsCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Initialise colour output (respects --no-color / NO_COLOR).
+    rustyclaw::theme::init_color(cli.common.no_color);
+
     let config_path = cli.common.config_path();
     let mut config = Config::load(config_path)?;
     cli.common.apply_overrides(&mut config);
@@ -383,7 +386,9 @@ async fn main() -> Result<()> {
                 }
                 config.ensure_dirs()?;
                 config.save(None)?;
-                println!("✓ Initialised config + workspace at {}", config.settings_dir.display());
+                println!("{}", rustyclaw::theme::icon_ok(
+                    &format!("Initialised config + workspace at {}", rustyclaw::theme::info(&config.settings_dir.display().to_string()))
+                ));
             }
         }
 
@@ -409,20 +414,25 @@ async fn main() -> Result<()> {
                 ConfigCommands::Set { path, value } => {
                     config_set(&mut config, &path, &value)?;
                     config.save(None)?;
-                    println!("✓ Set {} = {}", path, value);
+                    println!("{}", rustyclaw::theme::icon_ok(
+                        &format!("Set {} = {}", rustyclaw::theme::accent_bright(&path), rustyclaw::theme::info(&value))
+                    ));
                 }
                 ConfigCommands::Unset { path } => {
                     config_unset(&mut config, &path)?;
                     config.save(None)?;
-                    println!("✓ Unset {}", path);
+                    println!("{}", rustyclaw::theme::icon_ok(
+                        &format!("Unset {}", rustyclaw::theme::accent_bright(&path))
+                    ));
                 }
             }
         }
 
         // ── Doctor ──────────────────────────────────────────────
         Commands::Doctor(_args) => {
-            // Basic health checks — will be expanded.
-            println!("Running health checks…\n");
+            use rustyclaw::theme as t;
+
+            let sp = t::spinner("Running health checks…");
 
             let checks = vec![
                 ("Config file", config.settings_dir.join("config.toml").exists()),
@@ -432,17 +442,28 @@ async fn main() -> Result<()> {
                 ("Skills dir", config.skills_dir().exists()),
             ];
 
-            let mut ok = true;
+            // Brief pause so the spinner is visible.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            sp.finish_and_clear();
+
+            let mut all_ok = true;
             for (label, passed) in &checks {
-                let icon = if *passed { "✓" } else { "✗" };
-                println!("  {} {}", icon, label);
-                if !passed { ok = false; }
+                if *passed {
+                    println!("  {}", t::icon_ok(label));
+                } else {
+                    println!("  {}", t::icon_fail(label));
+                    all_ok = false;
+                }
             }
             println!();
-            if ok {
-                println!("All checks passed.");
+            if all_ok {
+                println!("{}", t::success("All checks passed."));
             } else {
-                println!("Some checks failed.  Run `rustyclaw setup` or `rustyclaw onboard` to fix.");
+                println!("{}", t::warn("Some checks failed."));
+                println!("  Run {} or {} to fix.",
+                    t::accent_bright("`rustyclaw setup`"),
+                    t::accent_bright("`rustyclaw onboard`"),
+                );
             }
         }
 
@@ -489,24 +510,32 @@ async fn main() -> Result<()> {
         Commands::Gateway(sub) => {
             match sub {
                 GatewayCommands::Start => {
-                    println!("Starting gateway…  (use `rustyclaw-gateway` for foreground mode)");
-                    // TODO: launch daemon
-                    println!("Gateway daemon start is not yet implemented. Use `rustyclaw gateway run` or `rustyclaw-gateway` instead.");
+                    use rustyclaw::theme as t;
+                    let sp = t::spinner("Starting gateway…");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    t::spinner_warn(&sp, "Gateway daemon start is not yet implemented");
+                    println!("  Use {} or {} instead.",
+                        t::accent_bright("`rustyclaw gateway run`"),
+                        t::accent_bright("`rustyclaw-gateway`"),
+                    );
                 }
                 GatewayCommands::Stop => {
-                    println!("Stopping gateway…");
-                    // TODO: stop daemon
-                    println!("Gateway daemon stop is not yet implemented.");
+                    use rustyclaw::theme as t;
+                    let sp = t::spinner("Stopping gateway…");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    t::spinner_warn(&sp, "Gateway daemon stop is not yet implemented");
                 }
                 GatewayCommands::Restart => {
-                    println!("Restarting gateway…");
-                    // TODO: restart daemon
-                    println!("Gateway daemon restart is not yet implemented.");
+                    use rustyclaw::theme as t;
+                    let sp = t::spinner("Restarting gateway…");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    t::spinner_warn(&sp, "Gateway daemon restart is not yet implemented");
                 }
                 GatewayCommands::Status { json: _ } => {
+                    use rustyclaw::theme as t;
                     let url = config.gateway_url.as_deref().unwrap_or("ws://127.0.0.1:9001");
-                    println!("Gateway URL: {}", url);
-                    println!("(detailed status probe not yet implemented)");
+                    println!("{}", t::label_value("Gateway URL", url));
+                    println!("  {}", t::muted("(detailed status probe not yet implemented)"));
                 }
                 GatewayCommands::Run(args) => {
                     use rustyclaw::gateway::{run_gateway, GatewayOptions};
@@ -518,7 +547,9 @@ async fn main() -> Result<()> {
                         _ => "127.0.0.1",
                     };
                     let listen = format!("{}:{}", host, args.port);
-                    println!("RustyClaw gateway listening on ws://{}", listen);
+                    println!("{}", rustyclaw::theme::icon_ok(
+                        &format!("RustyClaw gateway listening on {}", rustyclaw::theme::info(&format!("ws://{}", listen)))
+                    ));
 
                     let cancel = CancellationToken::new();
                     run_gateway(config, GatewayOptions { listen }, cancel).await?;
@@ -534,21 +565,27 @@ async fn main() -> Result<()> {
 
             match sub {
                 SkillsCommands::List => {
+                    use rustyclaw::theme as t;
                     let skills = sm.get_skills();
                     if skills.is_empty() {
-                        println!("No skills installed.");
+                        println!("{}", t::muted("No skills installed."));
                     } else {
                         for s in skills {
-                            let status = if s.enabled { "✓" } else { "✗" };
-                            println!("  {} {}", status, s.name);
+                            if s.enabled {
+                                println!("  {}", t::icon_ok(&t::accent_bright(&s.name)));
+                            } else {
+                                println!("  {}", t::icon_muted(&s.name));
+                            }
                         }
                     }
                 }
                 SkillsCommands::Info { name } => {
-                    println!("Skill info for '{}' is not yet implemented.", name);
+                    println!("{}", rustyclaw::theme::muted(
+                        &format!("Skill info for '{}' is not yet implemented.", name)
+                    ));
                 }
                 SkillsCommands::Check => {
-                    println!("Skill check is not yet implemented.");
+                    println!("{}", rustyclaw::theme::muted("Skill check is not yet implemented."));
                 }
             }
         }
@@ -599,24 +636,26 @@ fn print_status(config: &Config, args: &StatusArgs) {
         }
         println!("}}");
     } else {
-        println!("RustyClaw status\n");
-        println!("  Settings dir : {}", config.settings_dir.display());
-        println!("  Workspace    : {}", config.workspace_dir().display());
+        use rustyclaw::theme as t;
+        println!("{}\n", t::heading("RustyClaw status"));
+        println!("{}", t::label_value("Settings dir", &config.settings_dir.display().to_string()));
+        println!("{}", t::label_value("Workspace   ", &config.workspace_dir().display().to_string()));
         if let Some(m) = &config.model {
-            println!("  Provider     : {}", m.provider);
+            println!("{}", t::label_value("Provider    ", &m.provider));
             if let Some(model) = &m.model {
-                println!("  Model        : {}", model);
+                println!("{}", t::label_value("Model       ", model));
             }
         } else {
-            println!("  Provider     : (not configured — run `rustyclaw onboard`)");
+            println!("  {} : {}", t::muted("Provider    "),
+                t::warn(&format!("(not configured — run {})", t::accent_bright("`rustyclaw onboard`"))));
         }
         if let Some(gw) = &config.gateway_url {
-            println!("  Gateway URL  : {}", gw);
+            println!("{}", t::label_value("Gateway URL ", gw));
         }
         if args.verbose || args.all {
-            println!("  SOUL.md      : {}", config.soul_path().display());
-            println!("  Skills dir   : {}", config.skills_dir().display());
-            println!("  Credentials  : {}", config.credentials_dir().display());
+            println!("{}", t::label_value("SOUL.md     ", &config.soul_path().display().to_string()));
+            println!("{}", t::label_value("Skills dir  ", &config.skills_dir().display().to_string()));
+            println!("{}", t::label_value("Credentials ", &config.credentials_dir().display().to_string()));
         }
     }
 }

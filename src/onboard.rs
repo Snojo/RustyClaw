@@ -7,10 +7,12 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result};
+use crossterm::terminal;
 
 use crate::config::{Config, ModelProvider};
 use crate::secrets::SecretsManager;
 use crate::soul::{SoulManager, DEFAULT_SOUL_CONTENT};
+use crate::theme as t;
 
 // ── Provider catalogue ──────────────────────────────────────────────────────
 
@@ -112,72 +114,70 @@ pub fn run_onboard_wizard(
     let mut reader = stdin.lock();
 
     println!();
-    println!("┌──────────────────────────────────────────┐");
-    println!("│      🦀  RustyClaw Onboarding  🦀       │");
-    println!("└──────────────────────────────────────────┘");
+    t::print_header("🦀  RustyClaw Onboarding  🦀");
     println!();
 
     // ── Optional reset ─────────────────────────────────────────────
     if reset {
-        println!("Resetting configuration…");
+        println!("{}\n", t::warn("Resetting configuration…"));
         *config = Config::default();
     }
 
     // ── 1. Select model provider ───────────────────────────────────
-    println!("Select a model provider:");
+    println!("{}", t::heading("Select a model provider:"));
     println!();
     for (i, p) in PROVIDERS.iter().enumerate() {
-        println!("  {}. {}", i + 1, p.display);
+        println!("  {}. {}", t::accent_bright(&format!("{}", i + 1)), p.display);
     }
     println!();
 
     let provider = loop {
-        let choice = prompt_line(&mut reader, &format!("Provider [1-{}]: ", PROVIDERS.len()))?;
+        let choice = prompt_line(&mut reader, &format!("{} ", t::accent(&format!("Provider [1-{}]:", PROVIDERS.len()))))?;
         if let Ok(n) = choice.trim().parse::<usize>() {
             if n >= 1 && n <= PROVIDERS.len() {
                 break &PROVIDERS[n - 1];
             }
         }
-        println!("  Please enter a number between 1 and {}.", PROVIDERS.len());
+        println!("  {}", t::warn(&format!("Please enter a number between 1 and {}.", PROVIDERS.len())));
     };
 
     println!();
-    println!("  ✓ Selected: {}", provider.display);
+    println!("  {}", t::icon_ok(&format!("Selected: {}", t::accent_bright(provider.display))));
     println!();
 
     // ── 1b. Optional password for secrets vault ────────────────────
     let vault_exists = config.credentials_dir().join("secrets.json").exists();
     if !vault_exists {
-        println!("You can protect your secrets vault with a password.");
-        println!("If you skip this, a key file will be generated instead.");
+        println!("{}", t::bold("You can protect your secrets vault with a password."));
+        println!("{}", t::muted("If you skip this, a key file will be generated instead."));
         println!();
-        println!("  ⚠  If you set a password you will need to enter it every");
+        println!("  {}  If you set a password you will need to enter it every", t::warn("⚠"));
         println!("     time RustyClaw starts, including when the gateway is");
         println!("     launched.  Automated / unattended starts will not be");
         println!("     possible without the password.");
         println!();
 
-        let pw = prompt_secret(&mut reader, "Vault password (leave blank to skip): ")?;
+        let pw = prompt_secret(&mut reader, &format!("{} ", t::accent("Vault password (leave blank to skip):")))?;
         let pw = pw.trim().to_string();
 
         if pw.is_empty() {
-            println!("  ✓ Using auto-generated key file (no password).");
+            println!("  {}", t::icon_ok("Using auto-generated key file (no password)."));
             config.secrets_password_protected = false;
         } else {
-            let confirm = prompt_secret(&mut reader, "Confirm password: ")?;
+            let confirm = prompt_secret(&mut reader, &format!("{} ", t::accent("Confirm password:")))?;
             if confirm.trim() != pw {
-                println!("  ⚠ Passwords do not match — falling back to key file.");
+                println!("  {}", t::icon_warn("Passwords do not match — falling back to key file."));
                 config.secrets_password_protected = false;
             } else {
                 secrets.set_password(pw);
                 config.secrets_password_protected = true;
-                println!("  ✓ Secrets vault will be password-protected.");
+                println!("  {}", t::icon_ok("Secrets vault will be password-protected."));
             }
         }
         println!();
     } else if config.secrets_password_protected {
         // Vault already exists with a password — make sure SecretsManager has it.
-        let pw = prompt_secret(&mut reader, "Enter vault password: ")?;
+        let pw = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter vault password:")))?;
         secrets.set_password(pw.trim().to_string());
         println!();
     }
@@ -189,27 +189,27 @@ pub fn run_onboard_wizard(
         if let Some(_) = &existing {
             let reuse = prompt_line(
                 &mut reader,
-                &format!("An API key for {} is already stored. Keep it? [Y/n]: ", provider.display),
+                &format!("{} ", t::accent(&format!("An API key for {} is already stored. Keep it? [Y/n]:", provider.display))),
             )?;
             if reuse.trim().eq_ignore_ascii_case("n") {
-                let key = prompt_secret(&mut reader, "Enter API key: ")?;
+                let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
                 if key.trim().is_empty() {
-                    println!("  ⚠ No key entered — keeping existing key.");
+                    println!("  {}", t::icon_warn("No key entered — keeping existing key."));
                 } else {
                     secrets.store_secret(secret_key, key.trim())?;
-                    println!("  ✓ API key updated.");
+                    println!("  {}", t::icon_ok("API key updated."));
                 }
             } else {
-                println!("  ✓ Keeping existing API key.");
+                println!("  {}", t::icon_ok("Keeping existing API key."));
             }
         } else {
-            let key = prompt_secret(&mut reader, "Enter API key: ")?;
+            let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
             if key.trim().is_empty() {
-                println!("  ⚠ No key entered — you can add one later with:");
-                println!("      rustyclaw onboard");
+                println!("  {}", t::icon_warn("No key entered — you can add one later with:"));
+                println!("      {}", t::accent_bright("rustyclaw onboard"));
             } else {
                 secrets.store_secret(secret_key, key.trim())?;
-                println!("  ✓ API key stored securely.");
+                println!("  {}", t::icon_ok("API key stored securely."));
             }
         }
         println!();
@@ -217,13 +217,13 @@ pub fn run_onboard_wizard(
 
     // ── 3. Base URL (only for custom) ──────────────────────────────
     let base_url: String = if provider.id == "custom" {
-        let url = prompt_line(&mut reader, "Base URL (OpenAI-compatible): ")?;
+        let url = prompt_line(&mut reader, &format!("{} ", t::accent("Base URL (OpenAI-compatible):")))?;
         let url = url.trim().to_string();
         if url.is_empty() {
-            println!("  ⚠ No URL entered. You can set model.base_url in config.toml later.");
+            println!("  {}", t::icon_warn("No URL entered. You can set model.base_url in config.toml later."));
             String::new()
         } else {
-            println!("  ✓ Base URL: {}", url);
+            println!("  {}", t::icon_ok(&format!("Base URL: {}", t::info(&url))));
             url
         }
     } else {
@@ -233,20 +233,20 @@ pub fn run_onboard_wizard(
     // ── 4. Select a model ──────────────────────────────────────────
     let model: String = if provider.models.is_empty() {
         // Custom provider — ask for a model name.
-        let m = prompt_line(&mut reader, "Model name: ")?;
+        let m = prompt_line(&mut reader, &format!("{} ", t::accent("Model name:")))?;
         m.trim().to_string()
     } else {
-        println!("Select a default model:");
+        println!("{}", t::heading("Select a default model:"));
         println!();
         for (i, m) in provider.models.iter().enumerate() {
-            println!("  {}. {}", i + 1, m);
+            println!("  {}. {}", t::accent_bright(&format!("{}", i + 1)), m);
         }
         println!();
 
         loop {
             let choice = prompt_line(
                 &mut reader,
-                &format!("Model [1-{}]: ", provider.models.len()),
+                &format!("{} ", t::accent(&format!("Model [1-{}]:", provider.models.len()))),
             )?;
             if let Ok(n) = choice.trim().parse::<usize>() {
                 if n >= 1 && n <= provider.models.len() {
@@ -254,15 +254,15 @@ pub fn run_onboard_wizard(
                 }
             }
             println!(
-                "  Please enter a number between 1 and {}.",
-                provider.models.len()
+                "  {}",
+                t::warn(&format!("Please enter a number between 1 and {}.", provider.models.len()))
             );
         }
     };
 
     if !model.is_empty() {
         println!();
-        println!("  ✓ Default model: {}", model);
+        println!("  {}", t::icon_ok(&format!("Default model: {}", t::accent_bright(&model))));
     }
 
     // ── 5. Initialize / update SOUL.md ─────────────────────────────
@@ -280,7 +280,7 @@ pub fn run_onboard_wizard(
     let init_soul = if soul_customised {
         let answer = prompt_line(
             &mut reader,
-            "SOUL.md has been customised. Reset to default? [y/N]: ",
+            &format!("{} ", t::accent("SOUL.md has been customised. Reset to default? [y/N]:")),
         )?;
         answer.trim().eq_ignore_ascii_case("y")
     } else {
@@ -290,9 +290,9 @@ pub fn run_onboard_wizard(
     if init_soul {
         let mut soul = SoulManager::new(soul_path.clone());
         soul.load()?;
-        println!("  ✓ SOUL.md initialised at {}", soul_path.display());
+        println!("  {}", t::icon_ok(&format!("SOUL.md initialised at {}", t::info(&soul_path.display().to_string()))));
     } else {
-        println!("  ✓ Keeping existing SOUL.md");
+        println!("  {}", t::icon_ok("Keeping existing SOUL.md"));
     }
 
     // ── 6. Write config ────────────────────────────────────────────
@@ -315,16 +315,14 @@ pub fn run_onboard_wizard(
         .context("Failed to create directory structure")?;
     config.save(None)?;
 
-    println!();
-    println!("┌──────────────────────────────────────────┐");
-    println!("│        Onboarding complete! 🎉           │");
-    println!("└──────────────────────────────────────────┘");
-    println!();
+    t::print_header("Onboarding complete! 🎉");
     println!(
-        "Config saved to {}",
-        config.settings_dir.join("config.toml").display()
+        "  {}",
+        t::icon_ok(&format!("Config saved to {}",
+            t::info(&config.settings_dir.join("config.toml").display().to_string())
+        ))
     );
-    println!("Run `rustyclaw tui` to start the TUI.");
+    println!("  Run {} to start the TUI.", t::accent_bright("`rustyclaw tui`"));
     println!();
 
     Ok(true)
@@ -340,8 +338,41 @@ fn prompt_line(reader: &mut impl BufRead, prompt: &str) -> Result<String> {
     Ok(buf.trim_end_matches('\n').trim_end_matches('\r').to_string())
 }
 
-fn prompt_secret(reader: &mut impl BufRead, prompt: &str) -> Result<String> {
-    // If stdin is a tty we could disable echo, but for simplicity we just
-    // read a normal line.  A future improvement can use `rpassword`.
-    prompt_line(reader, prompt)
+fn prompt_secret(_reader: &mut impl BufRead, prompt: &str) -> Result<String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    // Enable raw mode to suppress echo and line buffering.
+    terminal::enable_raw_mode()?;
+
+    let result = (|| -> Result<String> {
+        let mut buf = String::new();
+        loop {
+            if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
+                match code {
+                    KeyCode::Enter => break,
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        anyhow::bail!("Interrupted");
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(buf)
+    })();
+
+    // Always restore cooked mode, even on error.
+    let _ = terminal::disable_raw_mode();
+    // Print newline since Enter was consumed without echo.
+    println!();
+
+    result
 }

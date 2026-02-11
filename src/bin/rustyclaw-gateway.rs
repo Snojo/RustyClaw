@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rustyclaw::args::CommonArgs;
 use rustyclaw::config::Config;
 use rustyclaw::gateway::{run_gateway, GatewayOptions};
+use rustyclaw::theme as t;
 use tokio_util::sync::CancellationToken;
 
 // ── Gateway bind modes ──────────────────────────────────────────────────────
@@ -97,6 +98,7 @@ impl Default for RunArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = GatewayCli::parse();
+    t::init_color(cli.common.no_color);
     let config_path = cli.common.config_path();
     let mut config = Config::load(config_path)?;
     cli.common.apply_overrides(&mut config);
@@ -108,8 +110,8 @@ async fn main() -> Result<()> {
             if json {
                 println!("{{ \"gateway_url\": \"{}\" }}", url);
             } else {
-                println!("Gateway URL: {}", url);
-                println!("(detailed status probe not yet implemented)");
+                println!("{}", t::label_value("Gateway URL", url));
+                println!("  {}", t::muted("(detailed status probe not yet implemented)"));
             }
             return Ok(());
         }
@@ -126,7 +128,7 @@ async fn main() -> Result<()> {
         .listen
         .unwrap_or_else(|| format!("{}:{}", host, args.port));
 
-    println!("RustyClaw gateway listening on ws://{}", listen);
+    println!("{}", t::icon_ok(&format!("Gateway listening on {}", t::info(&format!("ws://{}", listen)))));
 
     let cancel = CancellationToken::new();
     run_gateway(config, GatewayOptions { listen }, cancel).await

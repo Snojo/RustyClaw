@@ -37,3 +37,7 @@ tokio-tungstenite = "0.21"
 url = "2.5"
 tui-input = "0.8"
 strum = { version = "0.26", features = ["derive"] }
+
+# Terminal styling
+colored = "2.1"
+indicatif = "0.17"
