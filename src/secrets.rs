@@ -1,13 +1,20 @@
 use anyhow::{Context, Result};
-use keyring::Entry;
+use securestore::KeySource;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::path::PathBuf;
 
-/// Secrets manager with user-controlled access
+/// Secrets manager backed by an encrypted SecureStore vault.
+///
+/// The vault is stored at `{settings_dir}/secrets.json` and its key at
+/// `{settings_dir}/secrets.key`.  On first use both files are created
+/// automatically using a CSPRNG-generated key.
 pub struct SecretsManager {
-    service_name: String,
-    /// Cached secrets that have been approved for use
-    cached_secrets: HashMap<String, String>,
+    /// Path to the vault JSON file
+    vault_path: PathBuf,
+    /// Path to the key file
+    key_path: PathBuf,
+    /// In-memory vault handle (loaded lazily)
+    vault: Option<securestore::SecretsManager>,
     /// Whether the agent can access secrets without prompting
     agent_access_enabled: bool,
 }
@@ -19,20 +26,59 @@ pub struct Secret {
 }
 
 impl SecretsManager {
-    pub fn new(service_name: impl Into<String>) -> Self {
+    /// Create a new `SecretsManager` rooted in `settings_dir`.
+    ///
+    /// The vault and key files are created on-demand the first time a
+    /// mutating operation is performed.
+    pub fn new(settings_dir: impl Into<PathBuf>) -> Self {
+        let dir: PathBuf = settings_dir.into();
         Self {
-            service_name: service_name.into(),
-            cached_secrets: HashMap::new(),
+            vault_path: dir.join("secrets.json"),
+            key_path: dir.join("secrets.key"),
+            vault: None,
             agent_access_enabled: false,
         }
     }
 
+    /// Ensure the vault is loaded (or created if it doesn't exist yet).
+    fn ensure_vault(&mut self) -> Result<&mut securestore::SecretsManager> {
+        if self.vault.is_none() {
+            let vault = if self.vault_path.exists() && self.key_path.exists() {
+                securestore::SecretsManager::load(
+                    &self.vault_path,
+                    KeySource::from_file(&self.key_path),
+                )
+                .context("Failed to load secrets vault")?
+            } else {
+                // First run: create a brand-new vault with a random key.
+                if let Some(parent) = self.vault_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .context("Failed to create secrets directory")?;
+                }
+                let sman = securestore::SecretsManager::new(KeySource::Csprng)
+                    .context("Failed to create new secrets vault")?;
+                sman.export_key(&self.key_path)
+                    .context("Failed to export secrets key")?;
+                sman.save_as(&self.vault_path)
+                    .context("Failed to save new secrets vault")?;
+                // Re-load so the vault knows its on-disk path (save() requires it).
+                securestore::SecretsManager::load(
+                    &self.vault_path,
+                    KeySource::from_file(&self.key_path),
+                )
+                .context("Failed to reload newly-created secrets vault")?
+            };
+            self.vault = Some(vault);
+        }
+        // SAFETY: we just ensured `self.vault` is `Some`.
+        Ok(self.vault.as_mut().unwrap())
+    }
+
+    // ── Access control ──────────────────────────────────────────────
+
     /// Enable or disable automatic agent access to secrets
     pub fn set_agent_access(&mut self, enabled: bool) {
         self.agent_access_enabled = enabled;
-        if !enabled {
-            self.cached_secrets.clear();
-        }
     }
 
     /// Check if agent has access to secrets
@@ -40,93 +86,169 @@ impl SecretsManager {
         self.agent_access_enabled
     }
 
-    /// Store a secret in the system keyring
+    // ── CRUD operations ─────────────────────────────────────────────
+
+    /// Store (or overwrite) a secret in the vault and persist to disk.
     pub fn store_secret(&mut self, key: &str, value: &str) -> Result<()> {
-        let entry = Entry::new(&self.service_name, key)
-            .context("Failed to create keyring entry")?;
-        entry.set_password(value)
-            .context("Failed to store secret in keyring")?;
-        
-        // If agent access is enabled, cache it
-        if self.agent_access_enabled {
-            self.cached_secrets.insert(key.to_string(), value.to_string());
-        }
-        
+        let vault = self.ensure_vault()?;
+        vault.set(key, value);
+        vault.save().context("Failed to save secrets vault")?;
         Ok(())
     }
 
-    /// Retrieve a secret from the system keyring
-    /// This requires user approval if agent access is not enabled
+    /// Retrieve a secret from the vault.
+    ///
+    /// Returns `None` if the secret does not exist **or** if agent
+    /// access is disabled and the caller has not provided explicit
+    /// user approval.
     pub fn get_secret(&mut self, key: &str, user_approved: bool) -> Result<Option<String>> {
-        // Check cache first
-        if let Some(value) = self.cached_secrets.get(key) {
-            return Ok(Some(value.clone()));
-        }
-
-        // If agent access is not enabled and user hasn't approved, deny
         if !self.agent_access_enabled && !user_approved {
             return Ok(None);
         }
 
-        let entry = Entry::new(&self.service_name, key)
-            .context("Failed to create keyring entry")?;
-        
-        match entry.get_password() {
-            Ok(value) => {
-                // Cache if agent access is enabled or user approved
-                if self.agent_access_enabled || user_approved {
-                    self.cached_secrets.insert(key.to_string(), value.clone());
-                }
-                Ok(Some(value))
-            }
-            Err(_) => Ok(None),
+        let vault = self.ensure_vault()?;
+        match vault.get(key) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) if e.kind() == securestore::ErrorKind::SecretNotFound => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Failed to get secret: {}", e)),
         }
     }
 
-    /// Delete a secret from the system keyring
+    /// Delete a secret from the vault and persist to disk.
     pub fn delete_secret(&mut self, key: &str) -> Result<()> {
-        let entry = Entry::new(&self.service_name, key)
-            .context("Failed to create keyring entry")?;
-        entry.delete_password()
-            .context("Failed to delete secret from keyring")?;
-        
-        self.cached_secrets.remove(key);
+        let vault = self.ensure_vault()?;
+        vault.remove(key).context("Failed to remove secret")?;
+        vault.save().context("Failed to save secrets vault")?;
         Ok(())
     }
 
-    /// List all stored secret keys (not values)
-    pub fn list_secrets(&self) -> Vec<String> {
-        // Note: keyring doesn't provide a list function, so we maintain a separate metadata file
-        // For now, return cached keys
-        self.cached_secrets.keys().cloned().collect()
+    /// List all stored secret keys (not values).
+    pub fn list_secrets(&mut self) -> Vec<String> {
+        match self.ensure_vault() {
+            Ok(vault) => vault.keys().map(|s| s.to_string()).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
-    /// Clear the secret cache
-    pub fn clear_cache(&mut self) {
-        self.cached_secrets.clear();
-    }
+    /// No-op kept for API compatibility.  The securestore crate
+    /// decrypts on-demand so there is no separate cache to clear.
+    pub fn clear_cache(&mut self) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "rustyclaw_test_{}_{}", std::process::id(), id
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn test_secrets_manager_creation() {
-        let manager = SecretsManager::new("test_service");
+        let dir = temp_dir();
+        let manager = SecretsManager::new(&dir);
         assert!(!manager.has_agent_access());
-        assert_eq!(manager.list_secrets().len(), 0);
+
+        // Vault files should not exist yet (lazy creation)
+        assert!(!dir.join("secrets.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_agent_access_control() {
-        let mut manager = SecretsManager::new("test_service");
+        let dir = temp_dir();
+        let mut manager = SecretsManager::new(&dir);
         assert!(!manager.has_agent_access());
-        
+
         manager.set_agent_access(true);
         assert!(manager.has_agent_access());
-        
+
         manager.set_agent_access(false);
         assert!(!manager.has_agent_access());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_store_and_retrieve() {
+        let dir = temp_dir();
+        let mut manager = SecretsManager::new(&dir);
+        manager.set_agent_access(true);
+
+        manager.store_secret("api_key", "hunter2").unwrap();
+        assert!(Path::new(&dir.join("secrets.json")).exists());
+        assert!(Path::new(&dir.join("secrets.key")).exists());
+
+        let val = manager.get_secret("api_key", false).unwrap();
+        assert_eq!(val, Some("hunter2".to_string()));
+
+        // Non-existent key
+        let missing = manager.get_secret("nope", true).unwrap();
+        assert_eq!(missing, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_and_delete() {
+        let dir = temp_dir();
+        let mut manager = SecretsManager::new(&dir);
+        manager.set_agent_access(true);
+
+        manager.store_secret("a", "1").unwrap();
+        manager.store_secret("b", "2").unwrap();
+
+        let mut keys = manager.list_secrets();
+        keys.sort();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+
+        manager.delete_secret("a").unwrap();
+        let keys = manager.list_secrets();
+        assert_eq!(keys, vec!["b".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_access_denied_without_approval() {
+        let dir = temp_dir();
+        let mut manager = SecretsManager::new(&dir);
+        manager.store_secret("secret", "value").unwrap();
+
+        // Agent access off + no user approval → None
+        let val = manager.get_secret("secret", false).unwrap();
+        assert_eq!(val, None);
+
+        // With user approval → Some
+        let val = manager.get_secret("secret", true).unwrap();
+        assert_eq!(val, Some("value".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_from_disk() {
+        let dir = temp_dir();
+
+        // Create and populate
+        {
+            let mut m = SecretsManager::new(&dir);
+            m.store_secret("persist", "yes").unwrap();
+        }
+
+        // Load fresh and read back
+        {
+            let mut m = SecretsManager::new(&dir);
+            m.set_agent_access(true);
+            let val = m.get_secret("persist", false).unwrap();
+            assert_eq!(val, Some("yes".to_string()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

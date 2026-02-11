@@ -14,6 +14,9 @@ pub struct Config {
     pub messengers: Vec<MessengerConfig>,
     /// Whether to use secrets storage
     pub use_secrets: bool,
+    /// Gateway WebSocket URL for the TUI to connect to
+    #[serde(default)]
+    pub gateway_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +35,7 @@ impl Default for Config {
             skills_dir: None,
             messengers: Vec::new(),
             use_secrets: true,
+            gateway_url: None,
         }
     }
 }

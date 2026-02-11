@@ -53,6 +53,34 @@ Or if you built the release version:
 ./target/release/rustyclaw
 ```
 
+### CLI Commands
+
+Run the TUI:
+
+```bash
+./target/release/rustyclaw tui
+```
+
+Run a command locally (headless):
+
+```bash
+./target/release/rustyclaw command help
+```
+
+Send a command to the gateway:
+
+```bash
+./target/release/rustyclaw command --gateway ws://127.0.0.1:9001 help
+```
+
+### Gateway
+
+Start the WebSocket gateway:
+
+```bash
+./target/release/rustyclaw-gateway serve --listen ws://127.0.0.1:9001
+```
+
 ### TUI Interface
 
 The Terminal User Interface provides the following views:
@@ -176,4 +204,3 @@ MIT License - See LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
