@@ -10,96 +10,10 @@ use anyhow::{Context, Result};
 use crossterm::terminal;
 
 use crate::config::{Config, ModelProvider};
+use crate::providers::PROVIDERS;
 use crate::secrets::SecretsManager;
 use crate::soul::{SoulManager, DEFAULT_SOUL_CONTENT};
 use crate::theme as t;
-
-// ── Provider catalogue ──────────────────────────────────────────────────────
-
-/// A provider definition with its secret key name and available models.
-struct ProviderDef {
-    id: &'static str,
-    display: &'static str,
-    secret_key: Option<&'static str>,
-    base_url: Option<&'static str>,
-    models: &'static [&'static str],
-}
-
-const PROVIDERS: &[ProviderDef] = &[
-    ProviderDef {
-        id: "anthropic",
-        display: "Anthropic (Claude)",
-        secret_key: Some("ANTHROPIC_API_KEY"),
-        base_url: Some("https://api.anthropic.com"),
-        models: &[
-            "claude-opus-4-20250514",
-            "claude-sonnet-4-20250514",
-            "claude-haiku-4-20250514",
-        ],
-    },
-    ProviderDef {
-        id: "openai",
-        display: "OpenAI (GPT / o-series)",
-        secret_key: Some("OPENAI_API_KEY"),
-        base_url: Some("https://api.openai.com/v1"),
-        models: &[
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4.1-nano",
-            "o3",
-            "o4-mini",
-        ],
-    },
-    ProviderDef {
-        id: "google",
-        display: "Google (Gemini)",
-        secret_key: Some("GEMINI_API_KEY"),
-        base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
-        models: &[
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-        ],
-    },
-    ProviderDef {
-        id: "xai",
-        display: "xAI (Grok)",
-        secret_key: Some("XAI_API_KEY"),
-        base_url: Some("https://api.x.ai/v1"),
-        models: &["grok-3", "grok-3-mini"],
-    },
-    ProviderDef {
-        id: "openrouter",
-        display: "OpenRouter",
-        secret_key: Some("OPENROUTER_API_KEY"),
-        base_url: Some("https://openrouter.ai/api/v1"),
-        models: &[
-            "anthropic/claude-opus-4-20250514",
-            "anthropic/claude-sonnet-4-20250514",
-            "openai/gpt-4.1",
-            "google/gemini-2.5-pro",
-        ],
-    },
-    ProviderDef {
-        id: "ollama",
-        display: "Ollama (local)",
-        secret_key: None,
-        base_url: Some("http://localhost:11434/v1"),
-        models: &[
-            "llama3.1",
-            "mistral",
-            "codellama",
-            "deepseek-coder",
-        ],
-    },
-    ProviderDef {
-        id: "custom",
-        display: "Custom / OpenAI-compatible endpoint",
-        secret_key: Some("CUSTOM_API_KEY"),
-        base_url: None, // will prompt
-        models: &[],
-    },
-];
 
 // ── Public entry point ──────────────────────────────────────────────────────
 

@@ -1,7 +1,8 @@
+use crate::providers;
 use crate::secrets::SecretsManager;
 use crate::skills::SkillManager;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     None,
     ClearMessages,
@@ -14,6 +15,12 @@ pub enum CommandAction {
     GatewayRestart,
     /// Show gateway status info (no subcommand given)
     GatewayInfo,
+    /// Change the active provider
+    SetProvider(String),
+    /// Change the active model
+    SetModel(String),
+    /// Show skills dialog
+    ShowSkills,
 }
 
 #[derive(Debug, Clone)]
@@ -29,19 +36,31 @@ pub struct CommandContext<'a> {
 
 /// List of all known command names (without the / prefix).
 /// Includes subcommand forms so tab-completion works for them.
-pub const COMMAND_NAMES: &[&str] = &[
-    "help",
-    "clear",
-    "enable-access",
-    "disable-access",
-    "onboard",
-    "reload-skills",
-    "gateway",
-    "gateway start",
-    "gateway stop",
-    "gateway restart",
-    "quit",
-];
+pub fn command_names() -> Vec<String> {
+    let mut names: Vec<String> = vec![
+        "help".into(),
+        "clear".into(),
+        "enable-access".into(),
+        "disable-access".into(),
+        "onboard".into(),
+        "reload-skills".into(),
+        "gateway".into(),
+        "gateway start".into(),
+        "gateway stop".into(),
+        "gateway restart".into(),
+        "provider".into(),
+        "model".into(),
+        "skills".into(),
+        "quit".into(),
+    ];
+    for p in providers::provider_ids() {
+        names.push(format!("provider {}", p));
+    }
+    for m in providers::all_model_names() {
+        names.push(format!("model {}", m));
+    }
+    names
+}
 
 pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandResponse {
     // Strip the leading '/' if present
@@ -75,7 +94,9 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 "  /gateway start           - Connect to the gateway".to_string(),
                 "  /gateway stop            - Disconnect from the gateway".to_string(),
                 "  /gateway restart         - Restart the gateway connection".to_string(),
-                "  /quit                    - Quit".to_string(),
+                "  /provider <name>         - Change the AI provider".to_string(),
+                "  /model <name>            - Change the AI model".to_string(),
+                "  /skills                  - Show loaded skills".to_string(),
             ],
             action: CommandAction::None,
         },
@@ -141,6 +162,48 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 messages: Vec::new(),
                 action: CommandAction::GatewayInfo,
             },
+        },
+        "skills" => CommandResponse {
+            messages: Vec::new(),
+            action: CommandAction::ShowSkills,
+        },
+        "provider" => match parts.get(1) {
+            Some(name) => {
+                let name = name.to_string();
+                CommandResponse {
+                    messages: vec![format!("Switching provider to {}…", name)],
+                    action: CommandAction::SetProvider(name),
+                }
+            }
+            None => {
+                let list = providers::provider_ids().join(", ");
+                CommandResponse {
+                    messages: vec![
+                        "Usage: /provider <name>".to_string(),
+                        format!("Known providers: {}", list),
+                    ],
+                    action: CommandAction::None,
+                }
+            }
+        },
+        "model" => match parts.get(1) {
+            Some(name) => {
+                let name = name.to_string();
+                CommandResponse {
+                    messages: vec![format!("Switching model to {}…", name)],
+                    action: CommandAction::SetModel(name),
+                }
+            }
+            None => {
+                let list = providers::all_model_names().join(", ");
+                CommandResponse {
+                    messages: vec![
+                        "Usage: /model <name>".to_string(),
+                        format!("Known models: {}", list),
+                    ],
+                    action: CommandAction::None,
+                }
+            }
         },
         "q" | "quit" | "exit" => CommandResponse {
             messages: Vec::new(),

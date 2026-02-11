@@ -38,5 +38,11 @@ pub enum Action {
     GatewayMessage(String),
     /// The gateway reader detected a connection drop
     GatewayDisconnected(String),
+    /// Toggle the skills dialog overlay
+    ShowSkills,
+    /// Open the API-key input dialog for the given provider
+    PromptApiKey(String),
+    /// The user entered an API key in the dialog — proceed to store confirmation
+    ConfirmStoreSecret { provider: String, key: String },
     Noop,
 }

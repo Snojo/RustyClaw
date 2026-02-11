@@ -6,10 +6,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::action::Action;
 use crate::pages::Page;
 use crate::panes::{
-    config_pane::ConfigPane,
     messages::MessagesPane,
     secrets_pane::SecretsPane,
-    skills_pane::SkillsPane,
     InputMode, Pane, PaneState,
 };
 use crate::tui::EventResponse;
@@ -23,15 +21,14 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Result<Self> {
-        let focused_border_style = Style::default().fg(Color::LightGreen);
+        use crate::theme::tui_palette as tp;
+        let focused_border_style = tp::focused_border();
 
         Ok(Self {
             command_tx: None,
             panes: vec![
                 Box::new(MessagesPane::new(true, focused_border_style)),
-                Box::new(SkillsPane::new(false, focused_border_style)),
                 Box::new(SecretsPane::new(false, focused_border_style)),
-                Box::new(ConfigPane::new(false, focused_border_style)),
             ],
             focused_pane_index: 0,
             fullscreen_pane_index: None,

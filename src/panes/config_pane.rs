@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::action::Action;
 use crate::panes::{Pane, PaneState};
+use crate::theme::tui_palette as tp;
 use crate::tui::Frame;
 
 pub struct ConfigPane {
@@ -26,7 +27,7 @@ impl ConfigPane {
         if self.focused {
             self.focused_border_style
         } else {
-            Style::default()
+            tp::unfocused_border()
         }
     }
 
@@ -71,40 +72,69 @@ impl Pane for ConfigPane {
             .unwrap_or("No SOUL content loaded");
 
         let model_info = match &state.config.model {
-            Some(m) => format!(
-                "Provider: {}  Model: {}",
-                m.provider,
-                m.model.as_deref().unwrap_or("(none)")
-            ),
-            None => "(not configured — run `rustyclaw onboard`)".to_string(),
+            Some(m) => vec![
+                Span::styled(&m.provider, Style::default().fg(tp::ACCENT_BRIGHT)),
+                Span::styled(" / ", Style::default().fg(tp::MUTED)),
+                Span::styled(
+                    m.model.as_deref().unwrap_or("(none)"),
+                    Style::default().fg(tp::INFO),
+                ),
+            ],
+            None => vec![Span::styled(
+                "(not configured — run rustyclaw onboard)",
+                Style::default().fg(tp::WARN),
+            )],
         };
 
-        let text = [
-            format!(
-                "Settings Directory: {}",
-                state.config.settings_dir.display()
-            ),
-            format!(
-                "Workspace: {}",
-                state.config.workspace_dir().display()
-            ),
-            format!("Model: {}", model_info),
-            format!("SOUL Path: {}", state.soul_manager.get_path().display()),
-            format!("Use Secrets: {}", state.config.use_secrets),
-            String::new(),
-            "SOUL Content Preview:".to_string(),
-            soul_content
-                .lines()
-                .take(10)
-                .collect::<Vec<_>>()
-                .join("\n"),
+        let settings_str = state.config.settings_dir.display().to_string();
+        let workspace_str = state.config.workspace_dir().display().to_string();
+        let soul_path_str = state.soul_manager.get_path().display().to_string();
+        let secrets_str = if state.config.use_secrets { "enabled" } else { "disabled" };
+
+        fn kv<'a>(key: &'a str, val: &'a str) -> Line<'a> {
+            Line::from(vec![
+                Span::styled(key, Style::default().fg(tp::TEXT_DIM)),
+                Span::styled(val, Style::default().fg(tp::INFO)),
+            ])
+        }
+
+        let mut lines: Vec<Line> = vec![
+            kv("Settings : ", &settings_str),
+            kv("Workspace: ", &workspace_str),
         ];
 
-        let config_text = text.join("\n");
-        let config_para = Paragraph::new(config_text)
+        // Model line with rich spans
+        let mut model_line_spans = vec![Span::styled("Model    : ", Style::default().fg(tp::TEXT_DIM))];
+        model_line_spans.extend(model_info);
+        lines.push(Line::from(model_line_spans));
+
+        lines.push(kv("SOUL Path: ", &soul_path_str));
+        lines.push(kv("Secrets  : ", secrets_str));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "SOUL Content Preview:",
+            Style::default().fg(tp::ACCENT).add_modifier(Modifier::BOLD),
+        )));
+
+        for line in soul_content.lines().take(10) {
+            let style = if line.starts_with('#') {
+                Style::default().fg(tp::ACCENT_BRIGHT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(tp::TEXT_DIM)
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+        }
+
+        let title_style = if self.focused {
+            tp::title_focused()
+        } else {
+            tp::title_unfocused()
+        };
+
+        let config_para = Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title("Configuration")
+                    .title(Span::styled(" Configuration ", title_style))
                     .borders(Borders::ALL)
                     .border_style(self.border_style())
                     .border_type(self.border_type()),

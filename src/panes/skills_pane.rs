@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::action::Action;
 use crate::panes::{Pane, PaneState};
+use crate::theme::tui_palette as tp;
 use crate::tui::Frame;
 
 pub struct SkillsPane {
@@ -26,7 +27,7 @@ impl SkillsPane {
         if self.focused {
             self.focused_border_style
         } else {
-            Style::default()
+            tp::unfocused_border()
         }
     }
 
@@ -69,26 +70,42 @@ impl Pane for SkillsPane {
         let items: Vec<ListItem> = skills
             .iter()
             .map(|s| {
-                let status = if s.enabled { "✓" } else { "✗" };
-                let text = format!(
-                    "{} {} - {}",
-                    status,
-                    s.name,
-                    s.description.as_deref().unwrap_or("No description")
-                );
-                ListItem::new(text)
+                let (icon, icon_style) = if s.enabled {
+                    ("✓", Style::default().fg(tp::SUCCESS))
+                } else {
+                    ("✗", Style::default().fg(tp::MUTED))
+                };
+                let name_style = if s.enabled {
+                    Style::default().fg(tp::ACCENT_BRIGHT)
+                } else {
+                    Style::default().fg(tp::TEXT_DIM)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", icon), icon_style),
+                    Span::styled(&s.name, name_style),
+                    Span::styled(
+                        format!(" — {}", s.description.as_deref().unwrap_or("No description")),
+                        Style::default().fg(tp::MUTED),
+                    ),
+                ]))
             })
             .collect();
+
+        let title_style = if self.focused {
+            tp::title_focused()
+        } else {
+            tp::title_unfocused()
+        };
 
         let skills_list = List::new(items)
             .block(
                 Block::default()
-                    .title("Skills")
+                    .title(Span::styled(" Skills ", title_style))
                     .borders(Borders::ALL)
                     .border_style(self.border_style())
                     .border_type(self.border_type()),
             )
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(tp::TEXT));
 
         frame.render_widget(skills_list, area);
         Ok(())

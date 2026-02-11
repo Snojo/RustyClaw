@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::action::Action;
 use crate::panes::{Pane, PaneState};
+use crate::theme::tui_palette as tp;
 use crate::tui::Frame;
 
 pub struct SecretsPane {
@@ -26,7 +27,7 @@ impl SecretsPane {
         if self.focused {
             self.focused_border_style
         } else {
-            Style::default()
+            tp::unfocused_border()
         }
     }
 
@@ -65,25 +66,32 @@ impl Pane for SecretsPane {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, state: &PaneState<'_>) -> Result<()> {
-        let agent_access = if state.secrets_manager.has_agent_access() {
-            "Enabled"
+        let (access_label, access_style) = if state.secrets_manager.has_agent_access() {
+            ("Enabled", Style::default().fg(tp::SUCCESS))
         } else {
-            "Disabled"
+            ("Disabled", Style::default().fg(tp::WARN))
         };
 
-        let lines = vec![
-            format!("Agent Access: {}", agent_access),
-            String::new(),
-            "Commands (via footer):".to_string(),
-            "  enable-access".to_string(),
-            "  disable-access".to_string(),
+        let items: Vec<ListItem> = vec![
+            ListItem::new(Line::from(vec![
+                Span::styled("Agent Access: ", Style::default().fg(tp::TEXT_DIM)),
+                Span::styled(access_label, access_style),
+            ])),
+            ListItem::new(""),
+            ListItem::new(Span::styled("Commands:", Style::default().fg(tp::TEXT_DIM))),
+            ListItem::new(Span::styled("  /enable-access", Style::default().fg(tp::ACCENT_BRIGHT))),
+            ListItem::new(Span::styled("  /disable-access", Style::default().fg(tp::ACCENT_BRIGHT))),
         ];
 
-        let items: Vec<ListItem> = lines.iter().map(|t| ListItem::new(t.as_str())).collect();
+        let title_style = if self.focused {
+            tp::title_focused()
+        } else {
+            tp::title_unfocused()
+        };
 
         let secrets_list = List::new(items).block(
             Block::default()
-                .title("Secrets")
+                .title(Span::styled(" Secrets ", title_style))
                 .borders(Borders::ALL)
                 .border_style(self.border_style())
                 .border_type(self.border_type()),

@@ -18,6 +18,7 @@ use crate::pages::Page;
 use crate::panes::footer::FooterPane;
 use crate::panes::header::HeaderPane;
 use crate::panes::{GatewayStatus, InputMode, Pane, PaneState};
+use crate::providers;
 use crate::secrets::SecretsManager;
 use crate::skills::SkillManager;
 use crate::soul::SoulManager;
@@ -25,6 +26,15 @@ use crate::tui::{Event, EventResponse, Tui};
 
 /// Type alias for the client-side WebSocket write half.
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+
+/// Phase of the API-key dialog overlay.
+#[derive(Debug, Clone, PartialEq)]
+enum ApiKeyDialogPhase {
+    /// Prompting the user to enter an API key (text is masked)
+    EnterKey,
+    /// Asking whether to store the entered key permanently
+    ConfirmStore,
+}
 
 /// Shared state that is separate from the UI components so we can borrow both
 /// independently.
@@ -71,6 +81,25 @@ pub struct App {
     ws_sink: Option<WsSink>,
     /// Handle for the background WebSocket reader task
     reader_task: Option<JoinHandle<()>>,
+    /// Whether the skills dialog overlay is visible
+    show_skills_dialog: bool,
+    /// API-key dialog state
+    api_key_dialog: Option<ApiKeyDialogState>,
+}
+
+/// State for the API-key input dialog overlay.
+struct ApiKeyDialogState {
+    /// Which provider this key is for
+    provider: String,
+    /// Display name for the provider
+    display: String,
+    /// Name of the secret key (e.g. "ANTHROPIC_API_KEY")
+    #[allow(dead_code)]
+    secret_key: String,
+    /// Current input buffer (the API key being typed)
+    input: String,
+    /// Which phase the dialog is in
+    phase: ApiKeyDialogPhase,
 }
 
 impl App {
@@ -106,11 +135,7 @@ impl App {
         home.register_action_handler(action_tx.clone())?;
         let pages: Vec<Box<dyn Page>> = vec![Box::new(home)];
 
-        let gateway_status = if config.gateway_url.is_some() {
-            GatewayStatus::Disconnected
-        } else {
-            GatewayStatus::Unconfigured
-        };
+        let gateway_status = GatewayStatus::Disconnected;
 
         let state = SharedState {
             config,
@@ -136,6 +161,8 @@ impl App {
             gateway_cancel: None,
             ws_sink: None,
             reader_task: None,
+            show_skills_dialog: false,
+            api_key_dialog: None,
         })
     }
 
@@ -152,10 +179,8 @@ impl App {
         }
         self.pages[self.active_page].focus()?;
 
-        // Auto-start gateway if configured
-        if self.state.config.gateway_url.is_some() {
-            self.start_gateway().await;
-        }
+        // Auto-start gateway (uses configured URL or defaults to ws://127.0.0.1:9001)
+        self.start_gateway().await;
 
         loop {
             // Pull the next TUI event (key, mouse, tick, render, etc.)
@@ -167,25 +192,51 @@ impl App {
                     Event::Resize(w, h) => Some(Action::Resize(*w, *h)),
                     Event::Quit => Some(Action::Quit),
                     _ => {
-                        let mut ps = self.state.pane_state();
-                        // Footer (input bar) always gets first chance at key events.
-                        // In Normal mode it returns None for keys it doesn't consume,
-                        // letting the active page handle navigation.
-                        match self.footer.handle_events(event.clone(), &mut ps)? {
-                            Some(EventResponse::Stop(a)) => {
-                                self.state.input_mode = ps.input_mode;
-                                Some(a)
+                        // If the API key dialog is open, intercept keys for it
+                        if self.api_key_dialog.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_api_key_dialog_key(key.code);
+                                Some(action)
+                            } else {
+                                None
                             }
-                            _ => {
-                                self.state.input_mode = ps.input_mode;
-                                // Pass to the active page for navigation keys
-                                let mut ps2 = self.state.pane_state();
-                                match self.pages[self.active_page]
-                                    .handle_events(event.clone(), &mut ps2)?
-                                {
-                                    Some(EventResponse::Stop(a)) => Some(a),
-                                    Some(EventResponse::Continue(_)) => None,
-                                    None => None,
+                        }
+                        // If the skills dialog is open, intercept keys to close it
+                        else if self.show_skills_dialog {
+                            if let Event::Key(key) = &event {
+                                match key.code {
+                                    crossterm::event::KeyCode::Esc
+                                    | crossterm::event::KeyCode::Enter
+                                    | crossterm::event::KeyCode::Char('q') => {
+                                        self.show_skills_dialog = false;
+                                        Some(Action::Noop)
+                                    }
+                                    _ => Some(Action::Noop), // swallow all other keys
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            let mut ps = self.state.pane_state();
+                            // Footer (input bar) always gets first chance at key events.
+                            // In Normal mode it returns None for keys it doesn't consume,
+                            // letting the active page handle navigation.
+                            match self.footer.handle_events(event.clone(), &mut ps)? {
+                                Some(EventResponse::Stop(a)) => {
+                                    self.state.input_mode = ps.input_mode;
+                                    Some(a)
+                                }
+                                _ => {
+                                    self.state.input_mode = ps.input_mode;
+                                    // Pass to the active page for navigation keys
+                                    let mut ps2 = self.state.pane_state();
+                                    match self.pages[self.active_page]
+                                        .handle_events(event.clone(), &mut ps2)?
+                                    {
+                                        Some(EventResponse::Stop(a)) => Some(a),
+                                        Some(EventResponse::Continue(_)) => None,
+                                        None => None,
+                                    }
                                 }
                             }
                         }
@@ -242,15 +293,15 @@ impl App {
             }
             Action::ReconnectGateway => {
                 self.start_gateway().await;
-                return Ok(None);
+                return Ok(Some(Action::Update));
             }
             Action::DisconnectGateway => {
                 self.stop_gateway().await;
-                return Ok(None);
+                return Ok(Some(Action::Update));
             }
             Action::RestartGateway => {
                 self.restart_gateway().await;
-                return Ok(None);
+                return Ok(Some(Action::Update));
             }
             Action::SendToGateway(ref text) => {
                 self.send_to_gateway(text.clone()).await;
@@ -267,6 +318,16 @@ impl App {
                 self.ws_sink = None;
                 self.reader_task = None;
                 return Ok(Some(Action::Update));
+            }
+            Action::ShowSkills => {
+                self.show_skills_dialog = !self.show_skills_dialog;
+                return Ok(None);
+            }
+            Action::PromptApiKey(ref provider) => {
+                return Ok(self.open_api_key_dialog(provider.clone()));
+            }
+            Action::ConfirmStoreSecret { ref provider, ref key } => {
+                return self.handle_confirm_store_secret(provider.clone(), key.clone());
             }
             _ => {}
         }
@@ -353,6 +414,71 @@ impl App {
                         url_display,
                         self.state.gateway_status.label()
                     ));
+                }
+                CommandAction::SetProvider(ref provider) => {
+                    for msg in &response.messages {
+                        self.state.messages.push(msg.clone());
+                    }
+                    let model_cfg = self.state.config.model.get_or_insert_with(|| {
+                        crate::config::ModelProvider {
+                            provider: String::new(),
+                            model: None,
+                            base_url: None,
+                        }
+                    });
+                    model_cfg.provider = provider.clone();
+                    // Set the default base_url for the provider
+                    if let Some(url) = providers::base_url_for_provider(provider) {
+                        model_cfg.base_url = Some(url.to_string());
+                    }
+                    if let Err(e) = self.state.config.save(None) {
+                        self.state.messages.push(format!("Failed to save config: {}", e));
+                    } else {
+                        self.state.messages.push(format!("Provider set to {}.", provider));
+                    }
+
+                    // Check if the provider needs an API key
+                    if let Some(secret_key) = providers::secret_key_for_provider(provider) {
+                        match self.state.secrets_manager.get_secret(secret_key, true) {
+                            Ok(Some(_)) => {
+                                self.state.messages.push(format!(
+                                    "✓ API key for {} is already stored.",
+                                    providers::display_name_for_provider(provider),
+                                ));
+                            }
+                            _ => {
+                                // No key found — trigger the dialog
+                                return Ok(Some(Action::PromptApiKey(provider.clone())));
+                            }
+                        }
+                    } else {
+                        // Provider doesn't need an API key (e.g. Ollama)
+                        self.state.messages.push(format!(
+                            "{} does not require an API key.",
+                            providers::display_name_for_provider(provider),
+                        ));
+                    }
+                }
+                CommandAction::SetModel(ref model) => {
+                    for msg in &response.messages {
+                        self.state.messages.push(msg.clone());
+                    }
+                    let model_cfg = self.state.config.model.get_or_insert_with(|| {
+                        crate::config::ModelProvider {
+                            provider: "anthropic".into(),
+                            model: None,
+                            base_url: None,
+                        }
+                    });
+                    model_cfg.model = Some(model.clone());
+                    if let Err(e) = self.state.config.save(None) {
+                        self.state.messages.push(format!("Failed to save config: {}", e));
+                    } else {
+                        self.state.messages.push(format!("Model set to {}.", model));
+                    }
+                }
+                CommandAction::ShowSkills => {
+                    return Ok(Some(Action::ShowSkills));
                 }
                 CommandAction::None => {
                     for msg in response.messages {
@@ -538,21 +664,33 @@ impl App {
         }
     }
 
-    /// Restart: stop then start.
+    /// Restart: stop, let the TUI render the disconnect, then reconnect.
+    ///
+    /// We stop synchronously so the status flips to Disconnected immediately,
+    /// then schedule ReconnectGateway via the action channel after a short
+    /// delay so the event loop renders at least one frame showing the
+    /// intermediate state before the connection attempt begins.
     async fn restart_gateway(&mut self) {
         self.stop_gateway().await;
-        self.start_gateway().await;
+
+        // Schedule the reconnect after a brief pause so the render loop can
+        // show the Disconnected status before we start connecting again.
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let _ = tx.send(Action::ReconnectGateway);
+        });
     }
 
     fn draw(&mut self, tui: &mut Tui) -> Result<()> {
         tui.draw(|frame| {
             let area = frame.size();
 
-            // Layout: header (1 row), body (fill), footer (2 rows: status + input)
+            // Layout: header (3 rows), body (fill), footer (2 rows: status + input)
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(vec![
-                    Constraint::Length(1),
+                    Constraint::Length(3),
                     Constraint::Min(1),
                     Constraint::Length(2),
                 ])
@@ -571,7 +709,314 @@ impl App {
             let _ = self.header.draw(frame, chunks[0], &ps);
             let _ = self.pages[self.active_page].draw(frame, chunks[1], &ps);
             let _ = self.footer.draw(frame, chunks[2], &ps);
+
+            // Skills dialog overlay
+            if self.show_skills_dialog {
+                Self::draw_skills_dialog(frame, area, &ps);
+            }
+
+            // API key dialog overlay
+            if let Some(ref dialog) = self.api_key_dialog {
+                Self::draw_api_key_dialog(frame, area, dialog);
+            }
         })?;
         Ok(())
+    }
+
+    /// Draw a centered skills dialog overlay.
+    fn draw_skills_dialog(frame: &mut ratatui::Frame<'_>, area: Rect, state: &PaneState<'_>) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
+
+        let skills = state.skill_manager.get_skills();
+
+        // Size the dialog: width ~60 or 80% of screen, height = skills + 4 (border + header + hint)
+        let dialog_w = 60.min(area.width.saturating_sub(4));
+        let dialog_h = ((skills.len() as u16) + 4).min(area.height.saturating_sub(4)).max(6);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        // Clear the background behind the dialog
+        frame.render_widget(Clear, dialog_area);
+
+        let items: Vec<ListItem> = skills
+            .iter()
+            .map(|s| {
+                let (icon, icon_style) = if s.enabled {
+                    ("✓", Style::default().fg(tp::SUCCESS))
+                } else {
+                    ("✗", Style::default().fg(tp::MUTED))
+                };
+                let name_style = if s.enabled {
+                    Style::default().fg(tp::ACCENT_BRIGHT)
+                } else {
+                    Style::default().fg(tp::TEXT_DIM)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", icon), icon_style),
+                    Span::styled(&s.name, name_style),
+                    Span::styled(
+                        format!(" — {}", s.description.as_deref().unwrap_or("No description")),
+                        Style::default().fg(tp::MUTED),
+                    ),
+                ]))
+            })
+            .collect();
+
+        let empty_msg = if skills.is_empty() {
+            vec![ListItem::new(Span::styled(
+                "  No skills loaded. Place .md files in your skills/ directory.",
+                Style::default().fg(tp::TEXT_DIM),
+            ))]
+        } else {
+            vec![]
+        };
+
+        let all_items = if items.is_empty() { empty_msg } else { items };
+
+        let list = List::new(all_items)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        " Skills ",
+                        tp::title_focused(),
+                    ))
+                    .title_bottom(
+                        Line::from(Span::styled(
+                            " Esc to close ",
+                            Style::default().fg(tp::MUTED),
+                        ))
+                        .right_aligned(),
+                    )
+                    .borders(Borders::ALL)
+                    .border_style(tp::focused_border())
+                    .border_type(ratatui::widgets::BorderType::Rounded),
+            )
+            .style(Style::default().fg(tp::TEXT));
+
+        frame.render_widget(list, dialog_area);
+    }
+
+    // ── API-key dialog ──────────────────────────────────────────────────────
+
+    /// Open the API-key input dialog for the given provider.
+    fn open_api_key_dialog(&mut self, provider: String) -> Option<Action> {
+        let secret_key = match providers::secret_key_for_provider(&provider) {
+            Some(k) => k.to_string(),
+            None => return None, // shouldn't happen, but just in case
+        };
+        let display = providers::display_name_for_provider(&provider).to_string();
+        self.state.messages.push(format!(
+            "No API key found for {}. Please enter one below.",
+            display,
+        ));
+        self.api_key_dialog = Some(ApiKeyDialogState {
+            provider,
+            display,
+            secret_key,
+            input: String::new(),
+            phase: ApiKeyDialogPhase::EnterKey,
+        });
+        None
+    }
+
+    /// Handle key events when the API key dialog is open.
+    fn handle_api_key_dialog_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        use crossterm::event::KeyCode;
+
+        // Take the dialog state so we can mutate it without borrowing self
+        let Some(mut dialog) = self.api_key_dialog.take() else {
+            return Action::Noop;
+        };
+
+        match dialog.phase {
+            ApiKeyDialogPhase::EnterKey => match code {
+                KeyCode::Esc => {
+                    self.state
+                        .messages
+                        .push("API key entry cancelled.".to_string());
+                    // dialog is already taken — dropped
+                    return Action::Noop;
+                }
+                KeyCode::Enter => {
+                    if dialog.input.is_empty() {
+                        self.state.messages.push(
+                            "No key entered — you can add one later with /provider."
+                                .to_string(),
+                        );
+                        return Action::Noop;
+                    }
+                    // Move to confirmation phase
+                    dialog.phase = ApiKeyDialogPhase::ConfirmStore;
+                    self.api_key_dialog = Some(dialog);
+                    return Action::Noop;
+                }
+                KeyCode::Backspace => {
+                    dialog.input.pop();
+                    self.api_key_dialog = Some(dialog);
+                    return Action::Noop;
+                }
+                KeyCode::Char(c) => {
+                    dialog.input.push(c);
+                    self.api_key_dialog = Some(dialog);
+                    return Action::Noop;
+                }
+                _ => {
+                    self.api_key_dialog = Some(dialog);
+                    return Action::Noop;
+                }
+            },
+            ApiKeyDialogPhase::ConfirmStore => match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    // Store it
+                    let provider = dialog.provider.clone();
+                    let key = dialog.input.clone();
+                    return Action::ConfirmStoreSecret { provider, key };
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Use the key for this session but don't store
+                    self.state.messages.push(format!(
+                        "✓ API key for {} set for this session (not stored).",
+                        dialog.display,
+                    ));
+                    // We could set a runtime-only key here; for now just acknowledge
+                    return Action::Noop;
+                }
+                _ => {
+                    self.api_key_dialog = Some(dialog);
+                    return Action::Noop;
+                }
+            },
+        }
+    }
+
+    /// Store the API key in the secrets vault after user confirmation.
+    fn handle_confirm_store_secret(
+        &mut self,
+        provider: String,
+        key: String,
+    ) -> Result<Option<Action>> {
+        let secret_key = providers::secret_key_for_provider(&provider)
+            .unwrap_or("API_KEY");
+        let display = providers::display_name_for_provider(&provider).to_string();
+
+        match self.state.secrets_manager.store_secret(&secret_key, &key) {
+            Ok(()) => {
+                self.state.messages.push(format!(
+                    "✓ API key for {} stored securely.",
+                    display,
+                ));
+            }
+            Err(e) => {
+                self.state.messages.push(format!(
+                    "Failed to store API key: {}. Key is set for this session only.",
+                    e,
+                ));
+            }
+        }
+        Ok(Some(Action::Update))
+    }
+
+    /// Draw a centered API-key dialog overlay.
+    fn draw_api_key_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        dialog: &ApiKeyDialogState,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let dialog_w = 56.min(area.width.saturating_sub(4));
+        let dialog_h = 7_u16.min(area.height.saturating_sub(4)).max(5);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        // Clear the background behind the dialog
+        frame.render_widget(Clear, dialog_area);
+
+        let title = format!(" {} API Key ", dialog.display);
+        let block = Block::default()
+            .title(Span::styled(&title, tp::title_focused()))
+            .title_bottom(
+                Line::from(Span::styled(
+                    " Esc to cancel ",
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        match dialog.phase {
+            ApiKeyDialogPhase::EnterKey => {
+                // Label
+                let label = Line::from(Span::styled(
+                    format!(" Enter your {} API key:", dialog.display),
+                    Style::default().fg(tp::TEXT),
+                ));
+                if inner.height >= 1 {
+                    frame.render_widget(
+                        Paragraph::new(label),
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                    );
+                }
+
+                // Masked input
+                if inner.height >= 3 {
+                    let masked: String = "•".repeat(dialog.input.len());
+                    let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1);
+                    let prompt = Line::from(vec![
+                        Span::styled("❯ ", Style::default().fg(tp::ACCENT)),
+                        Span::styled(&masked, Style::default().fg(tp::TEXT)),
+                    ]);
+                    frame.render_widget(Paragraph::new(prompt), input_area);
+
+                    // Show cursor
+                    frame.set_cursor(
+                        input_area.x + 2 + masked.len() as u16,
+                        input_area.y,
+                    );
+                }
+            }
+            ApiKeyDialogPhase::ConfirmStore => {
+                // Show key length hint
+                let hint = Line::from(Span::styled(
+                    format!(" Key entered ({} chars).", dialog.input.len()),
+                    Style::default().fg(tp::SUCCESS),
+                ));
+                if inner.height >= 1 {
+                    frame.render_widget(
+                        Paragraph::new(hint),
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                    );
+                }
+
+                // Store question
+                if inner.height >= 3 {
+                    let question = Line::from(vec![
+                        Span::styled(
+                            " Store permanently in secrets vault? ",
+                            Style::default().fg(tp::TEXT),
+                        ),
+                        Span::styled(
+                            "[Y/n]",
+                            Style::default()
+                                .fg(tp::ACCENT_BRIGHT)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]);
+                    frame.render_widget(
+                        Paragraph::new(question),
+                        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+                    );
+                }
+            }
+        }
     }
 }

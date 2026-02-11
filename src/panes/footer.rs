@@ -6,8 +6,9 @@ use ratatui::{prelude::*, widgets::Paragraph};
 use tui_input::{backend::crossterm::EventHandler, Input};
 
 use crate::action::Action;
-use crate::commands::COMMAND_NAMES;
+use crate::commands::command_names;
 use crate::panes::{GatewayStatus, InputMode, Pane, PaneState};
+use crate::theme::tui_palette as tp;
 use crate::tui::{EventResponse, Frame};
 
 struct TimedStatusLine {
@@ -57,7 +58,8 @@ impl FooterPane {
         let val = self.input.value();
         if val.starts_with('/') {
             let partial = &val[1..]; // text after '/'
-            self.completions = COMMAND_NAMES
+            let names = command_names();
+            self.completions = names
                 .iter()
                 .filter(|c| c.starts_with(partial))
                 .map(|c| c.to_string())
@@ -83,10 +85,10 @@ impl FooterPane {
         }
     }
 
-    /// Height of the completion popup (capped at 6 rows).
+    /// Height of the completion popup (capped at 10 rows).
     pub fn completion_popup_height(&self) -> u16 {
         if self.show_completions {
-            (self.completions.len() as u16).min(6)
+            (self.completions.len() as u16).min(10)
         } else {
             0
         }
@@ -113,6 +115,10 @@ impl Pane for FooterPane {
             InputMode::Input => {
                 match key.code {
                     KeyCode::Enter => {
+                        // If a completion is highlighted, apply it first
+                        if self.show_completions && self.completion_index.is_some() {
+                            self.apply_completion();
+                        }
                         let value = self.input.value().to_string();
                         self.input.reset();
                         self.show_completions = false;
@@ -290,7 +296,7 @@ impl Pane for FooterPane {
             .unwrap_or("[ESC → navigate panes] [TAB → complete command] [/help]");
 
         frame.render_widget(
-            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(msg).style(tp::hint()),
             status_area,
         );
 
@@ -300,7 +306,7 @@ impl Pane for FooterPane {
         if self.show_completions && !self.completions.is_empty() {
             let popup_h = self.completion_popup_height();
             let popup_y = area.y.saturating_sub(popup_h);
-            let popup_w = 30.min(area.width);
+            let popup_w = 44.min(area.width);
             let popup_area = Rect {
                 x: area.x + 2, // align with input text start
                 y: popup_y,
@@ -320,12 +326,9 @@ impl Pane for FooterPane {
                 .enumerate()
                 .map(|(i, cmd)| {
                     let style = if Some(i) == self.completion_index {
-                        Style::default()
-                            .bg(Color::Blue)
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD)
+                        tp::popup_selected()
                     } else {
-                        Style::default().fg(Color::Gray)
+                        tp::popup_item()
                     };
                     Line::from(Span::styled(format!(" /{} ", cmd), style))
                 })
@@ -337,7 +340,7 @@ impl Pane for FooterPane {
                         ratatui::widgets::Block::default()
                             .borders(ratatui::widgets::Borders::NONE),
                     )
-                    .style(Style::default().bg(Color::DarkGray)),
+                    .style(tp::popup_bg()),
                 popup_area,
             );
         }
@@ -349,9 +352,9 @@ impl Pane for FooterPane {
 impl FooterPane {
     fn draw_input(&self, frame: &mut Frame<'_>, area: Rect, state: &PaneState<'_>) {
         let prefix = if state.input_mode == InputMode::Input {
-            Span::styled("❯ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            Span::styled("❯ ", tp::prompt_active())
         } else {
-            Span::styled("❯ ", Style::default().fg(Color::DarkGray))
+            Span::styled("❯ ", tp::prompt_inactive())
         };
 
         // Gateway status indicator (right-aligned)
@@ -359,27 +362,27 @@ impl FooterPane {
             GatewayStatus::Connected => (
                 "● ",
                 "connected ",
-                Style::default().fg(Color::Green),
+                Style::default().fg(tp::SUCCESS),
             ),
             GatewayStatus::Connecting => (
                 "◌ ",
                 "connecting… ",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(tp::WARN),
             ),
             GatewayStatus::Disconnected => (
                 "○ ",
                 "disconnected ",
-                Style::default().fg(Color::Red),
+                Style::default().fg(tp::ERROR),
             ),
             GatewayStatus::Error => (
                 "✖ ",
                 "error ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default().fg(tp::ERROR).add_modifier(Modifier::BOLD),
             ),
             GatewayStatus::Unconfigured => (
                 "○ ",
                 "no gateway ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(tp::MUTED),
             ),
         };
 

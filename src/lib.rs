@@ -9,6 +9,7 @@ pub mod messenger;
 pub mod onboard;
 pub mod pages;
 pub mod panes;
+pub mod providers;
 pub mod secrets;
 pub mod skills;
 pub mod soul;

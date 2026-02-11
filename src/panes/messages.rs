@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::action::Action;
 use crate::panes::{Pane, PaneState};
+use crate::theme::tui_palette as tp;
 use crate::tui::Frame;
 
 pub struct MessagesPane {
@@ -28,7 +29,7 @@ impl MessagesPane {
         if self.focused {
             self.focused_border_style
         } else {
-            Style::default()
+            tp::unfocused_border()
         }
     }
 
@@ -79,29 +80,47 @@ impl Pane for MessagesPane {
         let items: Vec<ListItem> = state
             .messages
             .iter()
-            .map(|m| ListItem::new(m.as_str()))
+            .map(|m| {
+                let style = if m.starts_with('▶') {
+                    tp::user_message()
+                } else if m.starts_with('(') || m.starts_with('[') {
+                    tp::system_message()
+                } else {
+                    tp::gateway_message()
+                };
+                ListItem::new(m.as_str()).style(style)
+            })
             .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL))
             .highlight_symbol(symbols::scrollbar::HORIZONTAL.end)
             .highlight_spacing(ratatui::widgets::HighlightSpacing::Always)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+            .highlight_style(tp::selected());
 
         let mut list_state = ListState::default().with_selected(Some(self.scroll_offset));
         frame.render_stateful_widget(list, area, &mut list_state);
 
+        let title_style = if self.focused {
+            tp::title_focused()
+        } else {
+            tp::title_unfocused()
+        };
+
         frame.render_widget(
             Block::default()
-                .title("Messages")
+                .title(Span::styled(" Messages ", title_style))
                 .borders(Borders::ALL)
                 .border_style(self.border_style())
                 .border_type(self.border_type())
                 .title_bottom(
-                    Line::from(format!(
-                        "{} of {}",
-                        self.scroll_offset.saturating_add(1),
-                        state.messages.len()
+                    Line::from(Span::styled(
+                        format!(
+                            " {} of {} ",
+                            self.scroll_offset.saturating_add(1),
+                            state.messages.len()
+                        ),
+                        Style::default().fg(tp::MUTED),
                     ))
                     .right_aligned(),
                 ),

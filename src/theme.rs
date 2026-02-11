@@ -263,14 +263,16 @@ mod tests {
 
     #[test]
     fn test_no_color_output() {
-        // Force no-color mode.
+        // Force no-color mode (both our flag AND the colored crate).
         COLOR_DISABLED.store(true, Ordering::Relaxed);
+        colored::control::set_override(false);
         assert_eq!(accent("hello"), "hello");
         assert_eq!(success("ok"), "ok");
         assert_eq!(error("fail"), "fail");
         assert_eq!(icon_ok("done"), "✓ done");
         assert_eq!(icon_fail("bad"), "✗ bad");
         // Reset for other tests.
+        colored::control::unset_override();
         COLOR_DISABLED.store(false, Ordering::Relaxed);
     }
 
@@ -281,5 +283,110 @@ mod tests {
         assert!(out.contains("Key"));
         assert!(out.contains("/some/path"));
         COLOR_DISABLED.store(false, Ordering::Relaxed);
+    }
+}
+
+// ── Ratatui palette ─────────────────────────────────────────────────────────
+//
+// Pre-built `ratatui::style::Color` and `Style` values derived from the
+// lobster palette, for use in TUI pane rendering.
+
+pub mod tui_palette {
+    use ratatui::style::{Color, Modifier, Style};
+
+    use super::palette;
+
+    // Convenience: convert palette tuple to ratatui Color.
+    const fn rgb(c: (u8, u8, u8)) -> Color {
+        Color::Rgb(c.0, c.1, c.2)
+    }
+
+    // ── Colours ─────────────────────────────────────────────
+
+    pub const ACCENT: Color = rgb(palette::ACCENT);
+    pub const ACCENT_BRIGHT: Color = rgb(palette::ACCENT_BRIGHT);
+    pub const ACCENT_DIM: Color = rgb(palette::ACCENT_DIM);
+    pub const INFO: Color = rgb(palette::INFO);
+    pub const SUCCESS: Color = rgb(palette::SUCCESS);
+    pub const WARN: Color = rgb(palette::WARN);
+    pub const ERROR: Color = rgb(palette::ERROR);
+    pub const MUTED: Color = rgb(palette::MUTED);
+
+    // Extra neutrals for the TUI
+    pub const SURFACE: Color = Color::Rgb(0x1E, 0x1C, 0x1A);   // dark warm grey bg
+    pub const SURFACE_BRIGHT: Color = Color::Rgb(0x2D, 0x2A, 0x27); // slightly lighter
+    pub const TEXT: Color = Color::Rgb(0xE8, 0xE0, 0xD8);      // warm off-white text
+    pub const TEXT_DIM: Color = Color::Rgb(0x9E, 0x94, 0x8C);   // subdued text
+
+    // ── Pre-built styles ────────────────────────────────────
+
+    /// Border style for focused pane.
+    pub const fn focused_border() -> Style {
+        Style::new().fg(ACCENT_BRIGHT)
+    }
+
+    /// Border style for unfocused pane.
+    pub const fn unfocused_border() -> Style {
+        Style::new().fg(MUTED)
+    }
+
+    /// Pane title when focused.
+    pub const fn title_focused() -> Style {
+        Style::new().fg(ACCENT_BRIGHT).add_modifier(Modifier::BOLD)
+    }
+
+    /// Pane title when unfocused.
+    pub const fn title_unfocused() -> Style {
+        Style::new().fg(TEXT_DIM)
+    }
+
+    /// Style for the input prompt indicator when active.
+    pub const fn prompt_active() -> Style {
+        Style::new().fg(ACCENT_BRIGHT).add_modifier(Modifier::BOLD)
+    }
+
+    /// Style for the input prompt indicator when inactive.
+    pub const fn prompt_inactive() -> Style {
+        Style::new().fg(MUTED)
+    }
+
+    /// Status line hint text style.
+    pub const fn hint() -> Style {
+        Style::new().fg(MUTED)
+    }
+
+    /// Highlighted / selected item in a list.
+    pub const fn selected() -> Style {
+        Style::new().fg(TEXT).bg(SURFACE_BRIGHT).add_modifier(Modifier::BOLD)
+    }
+
+    /// Completion popup background.
+    pub const fn popup_bg() -> Style {
+        Style::new().bg(SURFACE_BRIGHT)
+    }
+
+    /// Highlighted completion entry.
+    pub const fn popup_selected() -> Style {
+        Style::new().fg(ACCENT_BRIGHT).bg(ACCENT_DIM).add_modifier(Modifier::BOLD)
+    }
+
+    /// Normal completion entry.
+    pub const fn popup_item() -> Style {
+        Style::new().fg(TEXT_DIM)
+    }
+
+    /// Style for user-typed messages ("▶ something").
+    pub const fn user_message() -> Style {
+        Style::new().fg(ACCENT_BRIGHT)
+    }
+
+    /// Style for system/info messages.
+    pub const fn system_message() -> Style {
+        Style::new().fg(INFO)
+    }
+
+    /// Style for gateway response messages.
+    pub const fn gateway_message() -> Style {
+        Style::new().fg(TEXT)
     }
 }
