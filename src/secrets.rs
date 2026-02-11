@@ -34,6 +34,39 @@ pub enum SecretKind {
     Other,
 }
 
+impl std::fmt::Display for SecretKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey => write!(f, "API Key"),
+            Self::HttpPasskey => write!(f, "HTTP Passkey"),
+            Self::UsernamePassword => write!(f, "Login"),
+            Self::SshKey => write!(f, "SSH Key"),
+            Self::Token => write!(f, "Token"),
+            Self::FormAutofill => write!(f, "Form"),
+            Self::PaymentMethod => write!(f, "Payment"),
+            Self::SecureNote => write!(f, "Note"),
+            Self::Other => write!(f, "Other"),
+        }
+    }
+}
+
+impl SecretKind {
+    /// A single-character icon suitable for the TUI list.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "🔑",
+            Self::HttpPasskey => "🌐",
+            Self::UsernamePassword => "👤",
+            Self::SshKey => "🔐",
+            Self::Token => "🎫",
+            Self::FormAutofill => "📋",
+            Self::PaymentMethod => "💳",
+            Self::SecureNote => "📝",
+            Self::Other => "🔒",
+        }
+    }
+}
+
 /// Controls *when* the agent is allowed to read a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +91,35 @@ impl Default for AccessPolicy {
     }
 }
 
+impl std::fmt::Display for AccessPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Always => write!(f, "always"),
+            Self::WithApproval => write!(f, "approval"),
+            Self::WithAuth => write!(f, "auth"),
+            Self::SkillOnly(skills) => {
+                if skills.is_empty() {
+                    write!(f, "locked")
+                } else {
+                    write!(f, "skills: {}", skills.join(", "))
+                }
+            }
+        }
+    }
+}
+
+impl AccessPolicy {
+    /// Short badge-style label for the TUI.
+    pub fn badge(&self) -> &'static str {
+        match self {
+            Self::Always => "OPEN",
+            Self::WithApproval => "ASK",
+            Self::WithAuth => "AUTH",
+            Self::SkillOnly(_) => "SKILL",
+        }
+    }
+}
+
 /// Metadata envelope stored alongside the secret value(s) in the vault.
 ///
 /// This is JSON-serialized and stored under the key `cred:<name>`.
@@ -74,6 +136,10 @@ pub struct SecretEntry {
     /// Optional free-form description / notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// When true, the credential is listed but the agent cannot read
+    /// its value.  The user can re-enable it from the TUI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 /// The result of reading a credential — includes the metadata envelope
@@ -437,6 +503,14 @@ impl SecretsManager {
         let entry: SecretEntry = serde_json::from_str(&meta_json)
             .context("Corrupted credential metadata")?;
 
+        // ── Disabled check ─────────────────────────────────────────
+        if entry.disabled {
+            anyhow::bail!(
+                "Credential '{}' is disabled",
+                name,
+            );
+        }
+
         // ── Policy check ───────────────────────────────────────────
         if !self.check_access(&entry.policy, ctx) {
             anyhow::bail!(
@@ -529,6 +603,94 @@ impl SecretsManager {
         result
     }
 
+    /// List *all* credentials — both typed (`cred:*`) and legacy bare-key
+    /// secrets (e.g. `ANTHROPIC_API_KEY`).
+    ///
+    /// Legacy keys that match a known provider secret name get a
+    /// synthesised [`SecretEntry`] with `kind = ApiKey` or `Token`.
+    /// Internal keys (TOTP secret, `__init`, `cred:*`, `val:*`) are
+    /// excluded.
+    pub fn list_all_entries(&mut self) -> Vec<(String, SecretEntry)> {
+        let all_keys = self.list_secrets();
+
+        let mut result = Vec::new();
+        let mut typed_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. Typed credentials (cred:* prefix)
+        for key in &all_keys {
+            if let Some(name) = key.strip_prefix("cred:") {
+                if let Ok(Some(json)) = self.get_secret(key, true) {
+                    if let Ok(entry) = serde_json::from_str::<SecretEntry>(&json) {
+                        typed_names.insert(name.to_string());
+                        result.push((name.to_string(), entry));
+                    }
+                }
+            }
+        }
+
+        // 2. Legacy / bare keys — skip internal bookkeeping keys.
+        for key in &all_keys {
+            // Skip typed credential sub-keys and internal keys.
+            if key.starts_with("cred:")
+                || key.starts_with("val:")
+                || key == Self::TOTP_SECRET_KEY
+                || key == "__init"
+            {
+                continue;
+            }
+            // Skip if already covered by a typed credential.
+            if typed_names.contains(key.as_str()) {
+                continue;
+            }
+
+            // Try to match against a known provider secret key.
+            let (label, kind) = Self::label_for_legacy_key(key);
+            result.push((key.clone(), SecretEntry {
+                label,
+                kind,
+                policy: AccessPolicy::WithApproval,
+                description: None,
+                disabled: false,
+            }));
+        }
+
+        result
+    }
+
+    /// Produce a human-readable label and [`SecretKind`] for a legacy
+    /// bare vault key.
+    fn label_for_legacy_key(key: &str) -> (String, SecretKind) {
+        use crate::providers::PROVIDERS;
+        // Check known providers first.
+        for p in PROVIDERS {
+            if p.secret_key == Some(key) {
+                let kind = match p.auth_method {
+                    crate::providers::AuthMethod::DeviceFlow => SecretKind::Token,
+                    _ => SecretKind::ApiKey,
+                };
+                return (format!("{}", p.display), kind);
+            }
+        }
+        // Fallback: humanise the key name.
+        let label = key
+            .replace('_', " ")
+            .to_lowercase()
+            .split(' ')
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    Some(first) => {
+                        let upper: String = first.to_uppercase().collect();
+                        format!("{}{}", upper, c.as_str())
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        (label, SecretKind::Other)
+    }
+
     /// Delete a typed credential and all its associated vault keys.
     pub fn delete_credential(&mut self, name: &str) -> Result<()> {
         // Every possible sub-key pattern — best-effort removal.
@@ -549,6 +711,39 @@ impl SecretsManager {
         let pubkey_path = self.credentials_dir.join(format!("{}.pub", name));
         let _ = std::fs::remove_file(pubkey_path);
 
+        Ok(())
+    }
+
+    /// Enable or disable a credential.
+    ///
+    /// For typed credentials (`cred:<name>` exists) the `disabled`
+    /// flag is updated in the metadata envelope.  For legacy bare-key
+    /// secrets a typed envelope is created in-place so the flag can
+    /// be persisted.
+    pub fn set_credential_disabled(&mut self, name: &str, disabled: bool) -> Result<()> {
+        let meta_key = format!("cred:{}", name);
+
+        let mut entry: SecretEntry = match self.get_secret(&meta_key, true)? {
+            Some(json) => serde_json::from_str(&json)
+                .context("Corrupted credential metadata")?,
+            None => {
+                // Legacy bare key — promote to typed entry.
+                let (label, kind) = Self::label_for_legacy_key(name);
+                SecretEntry {
+                    label,
+                    kind,
+                    policy: AccessPolicy::WithApproval,
+                    description: None,
+                    disabled: false,
+                }
+            }
+        };
+
+        entry.disabled = disabled;
+
+        let meta_json = serde_json::to_string(&entry)
+            .context("Failed to serialize credential metadata")?;
+        self.store_secret(&meta_key, &meta_json)?;
         Ok(())
     }
 
@@ -594,6 +789,7 @@ impl SecretsManager {
             kind: SecretKind::SshKey,
             policy,
             description: Some(format!("Ed25519 keypair — {}", comment)),
+            disabled: false,
         };
 
         let meta_key = format!("cred:{}", name);
@@ -922,6 +1118,7 @@ mod tests {
             kind: SecretKind::ApiKey,
             policy: AccessPolicy::WithApproval,
             description: None,
+            disabled: false,
         };
         m.store_credential("anthropic_key", &entry, "sk-ant-12345", None).unwrap();
 
@@ -946,6 +1143,7 @@ mod tests {
             kind: SecretKind::UsernamePassword,
             policy: AccessPolicy::Always,
             description: None,
+            disabled: false,
         };
         m.store_credential("registry", &entry, "s3cret", Some("admin")).unwrap();
 
@@ -971,6 +1169,7 @@ mod tests {
             kind: SecretKind::HttpPasskey,
             policy: AccessPolicy::WithAuth,
             description: Some("FIDO2 credential".to_string()),
+            disabled: false,
         };
         m.store_credential("passkey1", &entry, "cred-id-base64", None).unwrap();
 
@@ -1036,12 +1235,14 @@ mod tests {
             kind: SecretKind::ApiKey,
             policy: AccessPolicy::Always,
             description: None,
+            disabled: false,
         };
         let e2 = SecretEntry {
             label: "Key B".to_string(),
             kind: SecretKind::Token,
             policy: AccessPolicy::WithApproval,
             description: None,
+            disabled: false,
         };
         m.store_credential("a", &e1, "val_a", None).unwrap();
         m.store_credential("b", &e2, "val_b", None).unwrap();
@@ -1059,6 +1260,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn test_list_all_entries_includes_legacy_keys() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        // Store a typed credential.
+        let entry = SecretEntry {
+            label: "Typed".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::Always,
+            description: None,
+            disabled: false,
+        };
+        m.store_credential("typed_one", &entry, "val", None).unwrap();
+
+        // Store legacy bare-key secrets (one known provider, one unknown).
+        m.store_secret("ANTHROPIC_API_KEY", "sk-ant-xxx").unwrap();
+        m.store_secret("MY_CUSTOM_SECRET", "custom-val").unwrap();
+
+        // Store internal keys that should NOT appear.
+        m.store_secret("__init", "").unwrap();
+
+        let all = m.list_all_entries();
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+
+        // Typed credential appears.
+        assert!(names.contains(&"typed_one"));
+        // Known provider legacy key appears with correct label.
+        assert!(names.contains(&"ANTHROPIC_API_KEY"));
+        let anth = all.iter().find(|(n, _)| n == "ANTHROPIC_API_KEY").unwrap();
+        assert_eq!(anth.1.kind, SecretKind::ApiKey);
+        assert!(anth.1.label.contains("Anthropic"));
+
+        // Unknown legacy key appears with humanised label.
+        assert!(names.contains(&"MY_CUSTOM_SECRET"));
+        let custom = all.iter().find(|(n, _)| n == "MY_CUSTOM_SECRET").unwrap();
+        assert_eq!(custom.1.kind, SecretKind::Other);
+
+        // Internal keys excluded.
+        assert!(!names.contains(&"__init"));
+
+        // Sub-keys (cred:*, val:*) excluded.
+        assert!(!names.iter().any(|n| n.starts_with("cred:") || n.starts_with("val:")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Access policy tests ─────────────────────────────────────────
 
     #[test]
@@ -1070,6 +1318,7 @@ mod tests {
             kind: SecretKind::Token,
             policy: AccessPolicy::Always,
             description: None,
+            disabled: false,
         };
         m.store_credential("open_tok", &entry, "val", None).unwrap();
 
@@ -1089,6 +1338,7 @@ mod tests {
             kind: SecretKind::ApiKey,
             policy: AccessPolicy::WithApproval,
             description: None,
+            disabled: false,
         };
         m.store_credential("guarded", &entry, "val", None).unwrap();
 
@@ -1117,6 +1367,7 @@ mod tests {
             kind: SecretKind::ApiKey,
             policy: AccessPolicy::WithAuth,
             description: None,
+            disabled: false,
         };
         m.store_credential("hs", &entry, "val", None).unwrap();
 
@@ -1139,6 +1390,7 @@ mod tests {
             kind: SecretKind::Token,
             policy: AccessPolicy::SkillOnly(vec!["deploy".to_string(), "ci".to_string()]),
             description: None,
+            disabled: false,
         };
         m.store_credential("dk", &entry, "val", None).unwrap();
 
@@ -1172,6 +1424,7 @@ mod tests {
             kind: SecretKind::Token,
             policy: AccessPolicy::Always,
             description: None,
+            disabled: false,
         };
         m.store_credential("tmp", &entry, "val", None).unwrap();
         assert_eq!(m.list_credentials().len(), 1);
@@ -1198,6 +1451,7 @@ mod tests {
             kind: SecretKind::FormAutofill,
             policy: AccessPolicy::WithApproval,
             description: Some("https://example.com/checkout".to_string()),
+            disabled: false,
         };
         let mut fields = BTreeMap::new();
         fields.insert("name".to_string(), "Ada Lovelace".to_string());
@@ -1232,6 +1486,7 @@ mod tests {
             kind: SecretKind::PaymentMethod,
             policy: AccessPolicy::WithAuth,
             description: None,
+            disabled: false,
         };
         let mut extra = BTreeMap::new();
         extra.insert("billing_zip".to_string(), "94025".to_string());
@@ -1277,6 +1532,7 @@ mod tests {
             kind: SecretKind::SecureNote,
             policy: AccessPolicy::WithAuth,
             description: Some("GitHub 2FA backup codes".to_string()),
+            disabled: false,
         };
         let note = "abcde-12345\nfghij-67890\nklmno-13579";
         m.store_credential("gh_recovery", &entry, note, None).unwrap();
@@ -1302,6 +1558,7 @@ mod tests {
             kind: SecretKind::FormAutofill,
             policy: AccessPolicy::Always,
             description: None,
+            disabled: false,
         };
         let mut fields = BTreeMap::new();
         fields.insert("user".to_string(), "alice".to_string());
@@ -1315,6 +1572,58 @@ mod tests {
         m.set_agent_access(true);
         let raw = m.get_secret("val:login:fields", false).unwrap();
         assert_eq!(raw, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_disable_and_reenable_credential() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let entry = SecretEntry {
+            label: "my key".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::Always,
+            description: None,
+            disabled: false,
+        };
+        m.store_credential("k", &entry, "secret", None).unwrap();
+
+        // Initially accessible.
+        let ctx = AccessContext::default();
+        assert!(m.get_credential("k", &ctx).unwrap().is_some());
+
+        // Disable it — access should fail.
+        m.set_credential_disabled("k", true).unwrap();
+        assert!(m.get_credential("k", &ctx).is_err());
+
+        // Still listed.
+        let creds = m.list_credentials();
+        assert_eq!(creds.len(), 1);
+        assert!(creds[0].1.disabled);
+
+        // Re-enable — access should work again.
+        m.set_credential_disabled("k", false).unwrap();
+        assert!(m.get_credential("k", &ctx).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_disable_legacy_key_promotes_to_typed() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        // Store a bare-key secret (no cred: metadata).
+        m.store_secret("MY_BARE_KEY", "bare_val").unwrap();
+
+        // Disabling it should create a cred: entry.
+        m.set_credential_disabled("MY_BARE_KEY", true).unwrap();
+
+        let all = m.list_all_entries();
+        let bare = all.iter().find(|(n, _)| n == "MY_BARE_KEY").unwrap();
+        assert!(bare.1.disabled);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

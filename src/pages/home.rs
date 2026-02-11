@@ -76,6 +76,9 @@ impl Page for Home {
             KeyCode::Char('k') | KeyCode::Up => {
                 return Ok(Some(EventResponse::Stop(Action::Up)));
             }
+            KeyCode::Enter => {
+                return Ok(Some(EventResponse::Stop(Action::Submit)));
+            }
             KeyCode::Char('f') => {
                 return Ok(Some(EventResponse::Stop(Action::ToggleFullScreen)));
             }
@@ -112,6 +115,13 @@ impl Page for Home {
                     self.panes[self.focused_pane_index].update(Action::UnFocus, state)?;
                     self.focused_pane_index = idx;
                     return self.panes[self.focused_pane_index].update(Action::Focus, state);
+                }
+            }
+            Action::Tick => {
+                // Broadcast Tick to *all* panes so unfocused ones can
+                // refresh their cached state (e.g. secrets list).
+                for pane in &mut self.panes {
+                    pane.update(Action::Tick, state)?;
                 }
             }
             _ => {

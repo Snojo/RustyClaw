@@ -70,6 +70,45 @@ struct ProviderSelectorState {
     scroll_offset: usize,
 }
 
+/// Which option is highlighted in the credential-management dialog.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CredDialogOption {
+    ToggleDisable,
+    Delete,
+    SetupTotp,
+    Cancel,
+}
+
+/// State for the credential-management dialog overlay.
+struct CredentialDialogState {
+    /// Vault key name of the credential
+    name: String,
+    /// Whether the credential is currently disabled
+    disabled: bool,
+    /// Whether 2FA is currently configured for the vault
+    has_totp: bool,
+    /// Currently highlighted menu option
+    selected: CredDialogOption,
+}
+
+/// Phase of the TOTP setup dialog.
+#[derive(Debug, Clone, PartialEq)]
+enum TotpDialogPhase {
+    /// Show the otpauth URL and ask user to enter TOTP code to verify
+    ShowUri { uri: String, input: String },
+    /// TOTP is already set up — offer to remove it
+    AlreadyConfigured,
+    /// Verification succeeded
+    Verified,
+    /// Verification failed — let the user retry
+    Failed { uri: String, input: String },
+}
+
+/// State for the 2FA (TOTP) setup dialog overlay.
+struct TotpDialogState {
+    phase: TotpDialogPhase,
+}
+
 /// Shared state that is separate from the UI components so we can borrow both
 /// independently.
 struct SharedState {
@@ -130,6 +169,10 @@ pub struct App {
     device_flow_loading: Option<FetchModelsLoading>,
     /// Provider-selector dialog state
     provider_selector: Option<ProviderSelectorState>,
+    /// Credential-management dialog state
+    credential_dialog: Option<CredentialDialogState>,
+    /// 2FA (TOTP) setup dialog state
+    totp_dialog: Option<TotpDialogState>,
 }
 
 /// State for the API-key input dialog overlay.
@@ -213,6 +256,8 @@ impl App {
             fetch_loading: None,
             device_flow_loading: None,
             provider_selector: None,
+            credential_dialog: None,
+            totp_dialog: None,
         })
     }
 
@@ -286,6 +331,24 @@ impl App {
                         else if self.model_selector.is_some() {
                             if let Event::Key(key) = &event {
                                 let action = self.handle_model_selector_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        }
+                        // If the credential dialog is open, intercept keys for it
+                        else if self.credential_dialog.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_credential_dialog_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        }
+                        // If the TOTP setup dialog is open, intercept keys for it
+                        else if self.totp_dialog.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_totp_dialog_key(key.code);
                                 Some(action)
                             } else {
                                 None
@@ -569,6 +632,40 @@ impl App {
                 self.state.loading_line = None;
                 self.state.messages.push(msg.clone());
                 return Ok(Some(Action::Update));
+            }
+            Action::ShowCredentialDialog { ref name, ref disabled } => {
+                let has_totp = self.state.secrets_manager.has_totp();
+                self.credential_dialog = Some(CredentialDialogState {
+                    name: name.clone(),
+                    disabled: *disabled,
+                    has_totp,
+                    selected: CredDialogOption::ToggleDisable,
+                });
+                return Ok(None);
+            }
+            Action::ShowTotpSetup => {
+                if self.state.secrets_manager.has_totp() {
+                    self.totp_dialog = Some(TotpDialogState {
+                        phase: TotpDialogPhase::AlreadyConfigured,
+                    });
+                } else {
+                    match self.state.secrets_manager.setup_totp("rustyclaw") {
+                        Ok(uri) => {
+                            self.totp_dialog = Some(TotpDialogState {
+                                phase: TotpDialogPhase::ShowUri {
+                                    uri,
+                                    input: String::new(),
+                                },
+                            });
+                        }
+                        Err(e) => {
+                            self.state.messages.push(format!(
+                                "Failed to set up 2FA: {}", e,
+                            ));
+                        }
+                    }
+                }
+                return Ok(None);
             }
             _ => {}
         }
@@ -935,6 +1032,16 @@ impl App {
             // Model selector dialog overlay
             if let Some(ref selector) = self.model_selector {
                 Self::draw_model_selector_dialog(frame, area, selector);
+            }
+
+            // Credential management dialog overlay
+            if let Some(ref dialog) = self.credential_dialog {
+                Self::draw_credential_dialog(frame, area, dialog);
+            }
+
+            // TOTP setup dialog overlay
+            if let Some(ref dialog) = self.totp_dialog {
+                Self::draw_totp_dialog(frame, area, dialog);
             }
         })?;
         Ok(())
@@ -1759,5 +1866,424 @@ impl App {
             List::new(items).style(Style::default().fg(tp::TEXT));
 
         frame.render_widget(list, inner);
+    }
+
+    // ── Credential management dialog ──────────────────────────
+
+    /// Handle key events when the credential dialog is open.
+    fn handle_credential_dialog_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+    ) -> Action {
+        use crossterm::event::KeyCode;
+
+        let Some(mut dlg) = self.credential_dialog.take() else {
+            return Action::Noop;
+        };
+
+        let options = [
+            CredDialogOption::ToggleDisable,
+            CredDialogOption::Delete,
+            CredDialogOption::SetupTotp,
+            CredDialogOption::Cancel,
+        ];
+
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Close without action
+                return Action::Noop;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let cur = options.iter().position(|o| *o == dlg.selected).unwrap_or(0);
+                let next = if cur == 0 { options.len() - 1 } else { cur - 1 };
+                dlg.selected = options[next];
+                self.credential_dialog = Some(dlg);
+                return Action::Noop;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let cur = options.iter().position(|o| *o == dlg.selected).unwrap_or(0);
+                let next = (cur + 1) % options.len();
+                dlg.selected = options[next];
+                self.credential_dialog = Some(dlg);
+                return Action::Noop;
+            }
+            KeyCode::Enter => {
+                match dlg.selected {
+                    CredDialogOption::ToggleDisable => {
+                        let new_state = !dlg.disabled;
+                        match self.state.secrets_manager.set_credential_disabled(&dlg.name, new_state) {
+                            Ok(()) => {
+                                let verb = if new_state { "disabled" } else { "enabled" };
+                                self.state.messages.push(format!(
+                                    "Credential '{}' {}.", dlg.name, verb,
+                                ));
+                            }
+                            Err(e) => {
+                                self.state.messages.push(format!(
+                                    "Failed to update credential: {}", e,
+                                ));
+                            }
+                        }
+                    }
+                    CredDialogOption::Delete => {
+                        // For legacy bare keys, also delete the raw key
+                        let meta_key = format!("cred:{}", dlg.name);
+                        let is_legacy = self.state.secrets_manager
+                            .get_secret(&meta_key, true)
+                            .ok()
+                            .flatten()
+                            .is_none();
+
+                        if is_legacy {
+                            let _ = self.state.secrets_manager.delete_secret(&dlg.name);
+                        }
+                        match self.state.secrets_manager.delete_credential(&dlg.name) {
+                            Ok(()) => {
+                                self.state.messages.push(format!(
+                                    "Credential '{}' deleted.", dlg.name,
+                                ));
+                            }
+                            Err(e) => {
+                                self.state.messages.push(format!(
+                                    "Failed to delete credential: {}", e,
+                                ));
+                            }
+                        }
+                    }
+                    CredDialogOption::SetupTotp => {
+                        return Action::ShowTotpSetup;
+                    }
+                    CredDialogOption::Cancel => {
+                        // Close
+                    }
+                }
+                return Action::Update;
+            }
+            _ => {
+                self.credential_dialog = Some(dlg);
+                return Action::Noop;
+            }
+        }
+    }
+
+    /// Draw a centered credential-management dialog overlay.
+    fn draw_credential_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        dlg: &CredentialDialogState,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{
+            Block, Borders, Clear, List, ListItem,
+        };
+
+        let dialog_w = 50.min(area.width.saturating_sub(4));
+        let dialog_h = 10u16.min(area.height.saturating_sub(4)).max(6);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let title = format!(" {} ", dlg.name);
+        let hint = " ↑↓ navigate · Enter select · Esc cancel ";
+
+        let block = Block::default()
+            .title(Span::styled(&title, tp::title_focused()))
+            .title_bottom(
+                Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let toggle_label = if dlg.disabled {
+            "  Enable credential"
+        } else {
+            "  Disable credential"
+        };
+
+        let totp_label = if dlg.has_totp {
+            "🔒 Manage 2FA (TOTP)"
+        } else {
+            "🔒 Set up 2FA (TOTP)"
+        };
+
+        let menu_items: Vec<(&str, CredDialogOption)> = vec![
+            (toggle_label, CredDialogOption::ToggleDisable),
+            ("  Delete credential", CredDialogOption::Delete),
+            (totp_label, CredDialogOption::SetupTotp),
+            ("  Cancel", CredDialogOption::Cancel),
+        ];
+
+        let items: Vec<ListItem> = menu_items
+            .iter()
+            .map(|(label, opt)| {
+                let is_selected = *opt == dlg.selected;
+                let (marker, style) = if is_selected {
+                    (
+                        "❯ ",
+                        Style::default()
+                            .fg(tp::ACCENT_BRIGHT)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("  ", Style::default().fg(tp::TEXT))
+                };
+
+                // Colour the delete option red when highlighted
+                let final_style = if *opt == CredDialogOption::Delete && is_selected {
+                    style.fg(tp::ERROR)
+                } else {
+                    style
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(tp::ACCENT)),
+                    Span::styled(*label, final_style),
+                ]))
+            })
+            .collect();
+
+        let list = List::new(items).style(Style::default().fg(tp::TEXT));
+        frame.render_widget(list, inner);
+    }
+
+    // ── TOTP setup dialog ─────────────────────────────────────
+
+    /// Handle key events when the TOTP dialog is open.
+    fn handle_totp_dialog_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+    ) -> Action {
+        use crossterm::event::KeyCode;
+
+        let Some(mut dlg) = self.totp_dialog.take() else {
+            return Action::Noop;
+        };
+
+        match dlg.phase {
+            TotpDialogPhase::ShowUri { ref mut uri, ref mut input } |
+            TotpDialogPhase::Failed { ref mut uri, ref mut input } => {
+                match code {
+                    KeyCode::Esc => {
+                        // Cancel — remove the TOTP secret we just set up
+                        let _ = self.state.secrets_manager.remove_totp();
+                        return Action::Noop;
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() && input.len() < 6 => {
+                        input.push(c);
+                        self.totp_dialog = Some(dlg);
+                        return Action::Noop;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        self.totp_dialog = Some(dlg);
+                        return Action::Noop;
+                    }
+                    KeyCode::Enter => {
+                        if input.len() == 6 {
+                            match self.state.secrets_manager.verify_totp(input) {
+                                Ok(true) => {
+                                    self.state.messages.push(
+                                        "✓ 2FA configured successfully.".to_string(),
+                                    );
+                                    self.totp_dialog = Some(TotpDialogState {
+                                        phase: TotpDialogPhase::Verified,
+                                    });
+                                    return Action::Noop;
+                                }
+                                Ok(false) => {
+                                    let saved_uri = uri.clone();
+                                    self.totp_dialog = Some(TotpDialogState {
+                                        phase: TotpDialogPhase::Failed {
+                                            uri: saved_uri,
+                                            input: String::new(),
+                                        },
+                                    });
+                                    return Action::Noop;
+                                }
+                                Err(e) => {
+                                    self.state.messages.push(format!(
+                                        "TOTP verification error: {}", e,
+                                    ));
+                                    let _ = self.state.secrets_manager.remove_totp();
+                                    return Action::Noop;
+                                }
+                            }
+                        }
+                        self.totp_dialog = Some(dlg);
+                        return Action::Noop;
+                    }
+                    _ => {
+                        self.totp_dialog = Some(dlg);
+                        return Action::Noop;
+                    }
+                }
+            }
+            TotpDialogPhase::AlreadyConfigured => {
+                match code {
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        // Keep 2FA
+                        return Action::Noop;
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        // Remove 2FA
+                        match self.state.secrets_manager.remove_totp() {
+                            Ok(()) => {
+                                self.state.messages.push(
+                                    "2FA has been removed.".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                self.state.messages.push(format!(
+                                    "Failed to remove 2FA: {}", e,
+                                ));
+                            }
+                        }
+                        return Action::Noop;
+                    }
+                    _ => {
+                        self.totp_dialog = Some(dlg);
+                        return Action::Noop;
+                    }
+                }
+            }
+            TotpDialogPhase::Verified => {
+                // Any key closes
+                return Action::Noop;
+            }
+        }
+    }
+
+    /// Draw a centered TOTP setup dialog overlay.
+    fn draw_totp_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        dlg: &TotpDialogState,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{
+            Block, Borders, Clear, Paragraph, Wrap,
+        };
+
+        let dialog_w = 56.min(area.width.saturating_sub(4));
+        let dialog_h = 12u16.min(area.height.saturating_sub(4)).max(8);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let (title, lines, hint): (&str, Vec<Line>, &str) = match &dlg.phase {
+            TotpDialogPhase::ShowUri { uri, input } => {
+                let masked: String = "*".repeat(input.len())
+                    + &"_".repeat(6 - input.len());
+                (
+                    " Set up 2FA ",
+                    vec![
+                        Line::from(Span::styled(
+                            "Add this URI to your authenticator app:",
+                            Style::default().fg(tp::TEXT),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            uri.as_str(),
+                            Style::default().fg(tp::ACCENT_BRIGHT),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "Enter the 6-digit code to verify:",
+                            Style::default().fg(tp::TEXT),
+                        )),
+                        Line::from(Span::styled(
+                            format!("  Code: [{}]", masked),
+                            Style::default().fg(tp::WARN).add_modifier(Modifier::BOLD),
+                        )),
+                    ],
+                    " Enter code · Esc cancel ",
+                )
+            }
+            TotpDialogPhase::Failed { input, .. } => {
+                let masked: String = "*".repeat(input.len())
+                    + &"_".repeat(6 - input.len());
+                (
+                    " 2FA Verification ",
+                    vec![
+                        Line::from(Span::styled(
+                            "✗ Code invalid — please try again.",
+                            Style::default().fg(tp::ERROR).add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            format!("  Code: [{}]", masked),
+                            Style::default().fg(tp::WARN).add_modifier(Modifier::BOLD),
+                        )),
+                    ],
+                    " Enter code · Esc cancel ",
+                )
+            }
+            TotpDialogPhase::AlreadyConfigured => {
+                (
+                    " 2FA Active ",
+                    vec![
+                        Line::from(Span::styled(
+                            "Two-factor authentication is already configured.",
+                            Style::default().fg(tp::SUCCESS),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "Remove 2FA? (y/n)",
+                            Style::default().fg(tp::WARN),
+                        )),
+                    ],
+                    " y remove · n/Esc keep ",
+                )
+            }
+            TotpDialogPhase::Verified => {
+                (
+                    " 2FA Configured ",
+                    vec![
+                        Line::from(Span::styled(
+                            "✓ Two-factor authentication is now active.",
+                            Style::default().fg(tp::SUCCESS).add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "Credentials with AUTH policy will require TOTP.",
+                            Style::default().fg(tp::TEXT_DIM),
+                        )),
+                    ],
+                    " Press any key to close ",
+                )
+            }
+        };
+
+        let block = Block::default()
+            .title(Span::styled(title, tp::title_focused()))
+            .title_bottom(
+                Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let text = ratatui::text::Text::from(lines);
+        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
     }
 }

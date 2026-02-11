@@ -62,5 +62,9 @@ pub enum Action {
     DeviceFlowAuthenticated { provider: String, token: String },
     /// Device flow authentication failed
     DeviceFlowFailed(String),
+    /// Open the credential-management dialog for a secret
+    ShowCredentialDialog { name: String, disabled: bool },
+    /// Open the 2FA (TOTP) setup / management dialog
+    ShowTotpSetup,
     Noop,
 }
