@@ -36,6 +36,30 @@ enum ApiKeyDialogPhase {
     ConfirmStore,
 }
 
+/// Spinner state shown while fetching models from a provider API.
+struct FetchModelsLoading {
+    /// Display name of the provider
+    display: String,
+    /// Tick counter for the spinner animation
+    tick: usize,
+}
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// State for the model-selector dialog overlay.
+struct ModelSelectorState {
+    /// Provider this selection is for
+    provider: String,
+    /// Display name
+    display: String,
+    /// Available model names
+    models: Vec<String>,
+    /// Currently highlighted index
+    selected: usize,
+    /// Scroll offset when the list is longer than the dialog
+    scroll_offset: usize,
+}
+
 /// Shared state that is separate from the UI components so we can borrow both
 /// independently.
 struct SharedState {
@@ -85,6 +109,10 @@ pub struct App {
     show_skills_dialog: bool,
     /// API-key dialog state
     api_key_dialog: Option<ApiKeyDialogState>,
+    /// Model-selector dialog state
+    model_selector: Option<ModelSelectorState>,
+    /// Loading spinner shown while fetching models
+    fetch_loading: Option<FetchModelsLoading>,
 }
 
 /// State for the API-key input dialog overlay.
@@ -163,6 +191,8 @@ impl App {
             reader_task: None,
             show_skills_dialog: false,
             api_key_dialog: None,
+            model_selector: None,
+            fetch_loading: None,
         })
     }
 
@@ -192,10 +222,33 @@ impl App {
                     Event::Resize(w, h) => Some(Action::Resize(*w, *h)),
                     Event::Quit => Some(Action::Quit),
                     _ => {
+                        // If we're loading models, only allow Esc to cancel
+                        if self.fetch_loading.is_some() {
+                            if let Event::Key(key) = &event {
+                                if key.code == crossterm::event::KeyCode::Esc {
+                                    self.fetch_loading = None;
+                                    self.state.messages.push(
+                                        "Model fetch cancelled.".to_string(),
+                                    );
+                                }
+                                Some(Action::Noop)
+                            } else {
+                                None
+                            }
+                        }
                         // If the API key dialog is open, intercept keys for it
-                        if self.api_key_dialog.is_some() {
+                        else if self.api_key_dialog.is_some() {
                             if let Event::Key(key) = &event {
                                 let action = self.handle_api_key_dialog_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        }
+                        // If the model selector is open, intercept keys for it
+                        else if self.model_selector.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_model_selector_key(key.code);
                                 Some(action)
                             } else {
                                 None
@@ -319,6 +372,13 @@ impl App {
                 self.reader_task = None;
                 return Ok(Some(Action::Update));
             }
+            Action::Tick => {
+                // Advance the loading spinner
+                if let Some(ref mut loading) = self.fetch_loading {
+                    loading.tick += 1;
+                }
+                // Fall through so panes also get Tick
+            }
             Action::ShowSkills => {
                 self.show_skills_dialog = !self.show_skills_dialog;
                 return Ok(None);
@@ -328,6 +388,20 @@ impl App {
             }
             Action::ConfirmStoreSecret { ref provider, ref key } => {
                 return self.handle_confirm_store_secret(provider.clone(), key.clone());
+            }
+            Action::FetchModels(ref provider) => {
+                self.spawn_fetch_models(provider.clone());
+                return Ok(None);
+            }
+            Action::FetchModelsFailed(ref msg) => {
+                self.fetch_loading = None;
+                self.state.messages.push(msg.clone());
+                return Ok(Some(Action::Update));
+            }
+            Action::ShowModelSelector { ref provider, ref models } => {
+                self.fetch_loading = None;
+                self.open_model_selector(provider.clone(), models.clone());
+                return Ok(None);
             }
             _ => {}
         }
@@ -445,6 +519,8 @@ impl App {
                                     "✓ API key for {} is already stored.",
                                     providers::display_name_for_provider(provider),
                                 ));
+                                // Key exists — go straight to model selection
+                                return Ok(Some(Action::FetchModels(provider.clone())));
                             }
                             _ => {
                                 // No key found — trigger the dialog
@@ -457,6 +533,8 @@ impl App {
                             "{} does not require an API key.",
                             providers::display_name_for_provider(provider),
                         ));
+                        // Go straight to model selection
+                        return Ok(Some(Action::FetchModels(provider.clone())));
                     }
                 }
                 CommandAction::SetModel(ref model) => {
@@ -719,6 +797,16 @@ impl App {
             if let Some(ref dialog) = self.api_key_dialog {
                 Self::draw_api_key_dialog(frame, area, dialog);
             }
+
+            // Fetch-loading spinner overlay
+            if let Some(ref loading) = self.fetch_loading {
+                Self::draw_fetch_loading(frame, area, loading);
+            }
+
+            // Model selector dialog overlay
+            if let Some(ref selector) = self.model_selector {
+                Self::draw_model_selector_dialog(frame, area, selector);
+            }
         })?;
         Ok(())
     }
@@ -880,8 +968,8 @@ impl App {
                         "✓ API key for {} set for this session (not stored).",
                         dialog.display,
                     ));
-                    // We could set a runtime-only key here; for now just acknowledge
-                    return Action::Noop;
+                    // Proceed to model selection
+                    return Action::FetchModels(dialog.provider.clone());
                 }
                 _ => {
                     self.api_key_dialog = Some(dialog);
@@ -915,7 +1003,8 @@ impl App {
                 ));
             }
         }
-        Ok(Some(Action::Update))
+        // After storing the key, proceed to model selection
+        Ok(Some(Action::FetchModels(provider)))
     }
 
     /// Draw a centered API-key dialog overlay.
@@ -1018,5 +1107,301 @@ impl App {
                 }
             }
         }
+    }
+
+    // ── Model selector dialog ───────────────────────────────────────────────
+
+    /// Spawn a background task to fetch models and send the result back
+    /// via the action channel.  Shows a loading spinner in the meantime.
+    fn spawn_fetch_models(&mut self, provider: String) {
+        let display = providers::display_name_for_provider(&provider).to_string();
+        self.state.messages.push(format!(
+            "Fetching available models for {}…",
+            display,
+        ));
+
+        // Show the loading spinner overlay
+        self.fetch_loading = Some(FetchModelsLoading {
+            display: display.clone(),
+            tick: 0,
+        });
+
+        // Gather what we need for the background task
+        let api_key = providers::secret_key_for_provider(&provider)
+            .and_then(|sk| {
+                self.state
+                    .secrets_manager
+                    .get_secret(sk, true)
+                    .ok()
+                    .flatten()
+            });
+
+        let base_url = self
+            .state
+            .config
+            .model
+            .as_ref()
+            .and_then(|m| m.base_url.clone());
+
+        let tx = self.action_tx.clone();
+        let provider_clone = provider.clone();
+
+        tokio::spawn(async move {
+            let models = providers::fetch_models(
+                &provider_clone,
+                api_key.as_deref(),
+                base_url.as_deref(),
+            )
+            .await;
+
+            if models.is_empty() {
+                let _ = tx.send(Action::FetchModelsFailed(format!(
+                    "No models found for {}. Set one manually with /model <name>.",
+                    providers::display_name_for_provider(&provider_clone),
+                )));
+            } else {
+                let _ = tx.send(Action::ShowModelSelector {
+                    provider: provider_clone,
+                    models,
+                });
+            }
+        });
+    }
+
+    /// Draw a centered loading spinner overlay.
+    fn draw_fetch_loading(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        loading: &FetchModelsLoading,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let dialog_w = 44.min(area.width.saturating_sub(4));
+        let dialog_h = 5_u16.min(area.height.saturating_sub(4)).max(3);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .title(Span::styled(
+                " Fetching Models ",
+                tp::title_focused(),
+            ))
+            .title_bottom(
+                Line::from(Span::styled(
+                    " Esc to cancel ",
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let spinner_char = SPINNER_FRAMES[loading.tick % SPINNER_FRAMES.len()];
+        let text = format!(
+            "  {} Fetching models from {}…",
+            spinner_char, loading.display,
+        );
+
+        if inner.height >= 1 {
+            let line_y = inner.y + inner.height / 2;
+            let line = Line::from(vec![
+                Span::styled(
+                    &text,
+                    Style::default().fg(tp::ACCENT_BRIGHT),
+                ),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(inner.x, line_y, inner.width, 1),
+            );
+        }
+    }
+
+    /// Open the model selector dialog with the given list.
+    fn open_model_selector(&mut self, provider: String, models: Vec<String>) {
+        let display = providers::display_name_for_provider(&provider).to_string();
+        self.model_selector = Some(ModelSelectorState {
+            provider,
+            display,
+            models,
+            selected: 0,
+            scroll_offset: 0,
+        });
+    }
+
+    /// Handle key events when the model selector dialog is open.
+    fn handle_model_selector_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        use crossterm::event::KeyCode;
+
+        let Some(mut sel) = self.model_selector.take() else {
+            return Action::Noop;
+        };
+
+        // Maximum visible rows in the dialog body
+        const MAX_VISIBLE: usize = 14;
+
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state
+                    .messages
+                    .push("Model selection cancelled.".to_string());
+                return Action::Noop;
+            }
+            KeyCode::Enter => {
+                if let Some(model_name) = sel.models.get(sel.selected).cloned() {
+                    // Save the selected model
+                    let model_cfg =
+                        self.state.config.model.get_or_insert_with(|| {
+                            crate::config::ModelProvider {
+                                provider: sel.provider.clone(),
+                                model: None,
+                                base_url: None,
+                            }
+                        });
+                    model_cfg.model = Some(model_name.clone());
+                    if let Err(e) = self.state.config.save(None) {
+                        self.state
+                            .messages
+                            .push(format!("Failed to save config: {}", e));
+                    } else {
+                        self.state.messages.push(format!(
+                            "✓ Model set to {}.",
+                            model_name,
+                        ));
+                    }
+                }
+                return Action::Update;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if sel.selected > 0 {
+                    sel.selected -= 1;
+                    if sel.selected < sel.scroll_offset {
+                        sel.scroll_offset = sel.selected;
+                    }
+                }
+                self.model_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if sel.selected + 1 < sel.models.len() {
+                    sel.selected += 1;
+                    if sel.selected >= sel.scroll_offset + MAX_VISIBLE {
+                        sel.scroll_offset = sel.selected - MAX_VISIBLE + 1;
+                    }
+                }
+                self.model_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::Home => {
+                sel.selected = 0;
+                sel.scroll_offset = 0;
+                self.model_selector = Some(sel);
+                return Action::Noop;
+            }
+            KeyCode::End => {
+                sel.selected = sel.models.len().saturating_sub(1);
+                sel.scroll_offset = sel
+                    .models
+                    .len()
+                    .saturating_sub(MAX_VISIBLE);
+                self.model_selector = Some(sel);
+                return Action::Noop;
+            }
+            _ => {
+                self.model_selector = Some(sel);
+                return Action::Noop;
+            }
+        }
+    }
+
+    /// Draw a centered model-selector dialog overlay.
+    fn draw_model_selector_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        sel: &ModelSelectorState,
+    ) {
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
+
+        const MAX_VISIBLE: usize = 14;
+
+        let dialog_w = 60.min(area.width.saturating_sub(4));
+        let visible_count = sel.models.len().min(MAX_VISIBLE);
+        // +4 for border (2) + title line + hint line
+        let dialog_h = ((visible_count as u16) + 4)
+            .min(area.height.saturating_sub(4))
+            .max(6);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        // Clear the background behind the dialog
+        frame.render_widget(Clear, dialog_area);
+
+        let title = format!(" Select a {} model ", sel.display);
+        let hint = if sel.models.len() > MAX_VISIBLE {
+            format!(
+                " {}/{} · ↑↓ navigate · Enter select · Esc cancel ",
+                sel.selected + 1,
+                sel.models.len(),
+            )
+        } else {
+            " ↑↓ navigate · Enter select · Esc cancel ".to_string()
+        };
+
+        let block = Block::default()
+            .title(Span::styled(&title, tp::title_focused()))
+            .title_bottom(
+                Line::from(Span::styled(
+                    &hint,
+                    Style::default().fg(tp::MUTED),
+                ))
+                .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(tp::focused_border())
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let end = (sel.scroll_offset + MAX_VISIBLE).min(sel.models.len());
+        let visible_models = &sel.models[sel.scroll_offset..end];
+
+        let items: Vec<ListItem> = visible_models
+            .iter()
+            .enumerate()
+            .map(|(i, model)| {
+                let abs_idx = sel.scroll_offset + i;
+                let is_selected = abs_idx == sel.selected;
+                let (marker, style) = if is_selected {
+                    (
+                        "❯ ",
+                        Style::default()
+                            .fg(tp::ACCENT_BRIGHT)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("  ", Style::default().fg(tp::TEXT))
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(tp::ACCENT)),
+                    Span::styled(model.as_str(), style),
+                ]))
+            })
+            .collect();
+
+        let list =
+            List::new(items).style(Style::default().fg(tp::TEXT));
+
+        frame.render_widget(list, inner);
     }
 }

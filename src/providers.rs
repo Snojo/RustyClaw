@@ -123,3 +123,125 @@ pub fn models_for_provider(id: &str) -> &'static [&'static str] {
 pub fn base_url_for_provider(id: &str) -> Option<&'static str> {
     provider_by_id(id).and_then(|p| p.base_url)
 }
+
+// ── Dynamic model fetching ──────────────────────────────────────────────────
+
+/// Fetch the list of available models from a provider's API.
+///
+/// Uses the provider's API key (if required) and base URL to query the
+/// models endpoint.  Falls back to the static catalogue on any error.
+pub async fn fetch_models(
+    provider_id: &str,
+    api_key: Option<&str>,
+    base_url_override: Option<&str>,
+) -> Vec<String> {
+    let def = match provider_by_id(provider_id) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+
+    let base = base_url_override
+        .or(def.base_url)
+        .unwrap_or("");
+
+    if base.is_empty() {
+        return static_models(def);
+    }
+
+    let result = match provider_id {
+        // Anthropic has no public models endpoint — always static
+        "anthropic" => return static_models(def),
+        // Google Gemini uses a different response shape
+        "google" => fetch_google_models(base, api_key).await,
+        // Ollama — no auth needed, OpenAI-compatible /v1/models
+        "ollama" => fetch_openai_compatible_models(base, None).await,
+        // Everything else is OpenAI-compatible
+        _ => fetch_openai_compatible_models(base, api_key).await,
+    };
+
+    match result {
+        Ok(models) if !models.is_empty() => models,
+        _ => static_models(def),
+    }
+}
+
+/// Convert the static catalogue to owned strings.
+fn static_models(def: &ProviderDef) -> Vec<String> {
+    def.models.iter().map(|s| s.to_string()).collect()
+}
+
+/// Fetch from an OpenAI-compatible `/models` endpoint.
+///
+/// Works for OpenAI, xAI, OpenRouter, Ollama, and custom providers.
+async fn fetch_openai_compatible_models(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, reqwest::Error> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req.send().await?.error_for_status()?;
+    let body: serde_json::Value = resp.json().await?;
+
+    let models = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(models)
+}
+
+/// Fetch from the Google Gemini `/models` endpoint.
+async fn fetch_google_models(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, reqwest::Error> {
+    let key = match api_key {
+        Some(k) => k,
+        None => return Ok(Vec::new()),
+    };
+
+    let url = format!(
+        "{}/models?key={}",
+        base_url.trim_end_matches('/'),
+        key,
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let resp = client.get(&url).send().await?.error_for_status()?;
+    let body: serde_json::Value = resp.json().await?;
+
+    let models = body
+        .get("models")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("name")
+                        .and_then(|v| v.as_str())
+                        // API returns "models/gemini-2.5-pro" — strip the prefix
+                        .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(models)
+}

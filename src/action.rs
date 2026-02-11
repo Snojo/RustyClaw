@@ -44,5 +44,11 @@ pub enum Action {
     PromptApiKey(String),
     /// The user entered an API key in the dialog — proceed to store confirmation
     ConfirmStoreSecret { provider: String, key: String },
+    /// Fetch models from the provider API, then open the model selector
+    FetchModels(String),
+    /// The model fetch failed
+    FetchModelsFailed(String),
+    /// Open the model-selection dialog with a fetched list
+    ShowModelSelector { provider: String, models: Vec<String> },
     Noop,
 }
