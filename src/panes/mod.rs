@@ -49,6 +49,8 @@ pub struct PaneState<'a> {
     pub messages: &'a mut Vec<String>,
     pub input_mode: InputMode,
     pub gateway_status: GatewayStatus,
+    /// Animated loading line shown at the bottom of the messages list.
+    pub loading_line: Option<String>,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]

@@ -70,6 +70,8 @@ struct SharedState {
     skill_manager: SkillManager,
     soul_manager: SoulManager,
     gateway_status: GatewayStatus,
+    /// Animated loading line shown at the bottom of the messages list.
+    loading_line: Option<String>,
 }
 
 impl SharedState {
@@ -82,6 +84,7 @@ impl SharedState {
             messages: &mut self.messages,
             input_mode: self.input_mode,
             gateway_status: self.gateway_status,
+            loading_line: self.loading_line.clone(),
         }
     }
 }
@@ -173,6 +176,7 @@ impl App {
             skill_manager,
             soul_manager,
             gateway_status,
+            loading_line: None,
         };
 
         Ok(Self {
@@ -222,22 +226,22 @@ impl App {
                     Event::Resize(w, h) => Some(Action::Resize(*w, *h)),
                     Event::Quit => Some(Action::Quit),
                     _ => {
-                        // If we're loading models, only allow Esc to cancel
+                        // While loading models, Esc cancels the fetch
                         if self.fetch_loading.is_some() {
                             if let Event::Key(key) = &event {
                                 if key.code == crossterm::event::KeyCode::Esc {
                                     self.fetch_loading = None;
+                                    self.state.loading_line = None;
                                     self.state.messages.push(
                                         "Model fetch cancelled.".to_string(),
                                     );
+                                    // Consume the Esc so it doesn't propagate
+                                    continue;
                                 }
-                                Some(Action::Noop)
-                            } else {
-                                None
                             }
                         }
                         // If the API key dialog is open, intercept keys for it
-                        else if self.api_key_dialog.is_some() {
+                        if self.api_key_dialog.is_some() {
                             if let Event::Key(key) = &event {
                                 let action = self.handle_api_key_dialog_key(key.code);
                                 Some(action)
@@ -373,9 +377,14 @@ impl App {
                 return Ok(Some(Action::Update));
             }
             Action::Tick => {
-                // Advance the loading spinner
+                // Advance the inline loading line
                 if let Some(ref mut loading) = self.fetch_loading {
                     loading.tick += 1;
+                    let spinner = SPINNER_FRAMES[loading.tick % SPINNER_FRAMES.len()];
+                    self.state.loading_line = Some(format!(
+                        "  {} Fetching models from {}…",
+                        spinner, loading.display,
+                    ));
                 }
                 // Fall through so panes also get Tick
             }
@@ -395,11 +404,13 @@ impl App {
             }
             Action::FetchModelsFailed(ref msg) => {
                 self.fetch_loading = None;
+                self.state.loading_line = None;
                 self.state.messages.push(msg.clone());
                 return Ok(Some(Action::Update));
             }
             Action::ShowModelSelector { ref provider, ref models } => {
                 self.fetch_loading = None;
+                self.state.loading_line = None;
                 self.open_model_selector(provider.clone(), models.clone());
                 return Ok(None);
             }
@@ -782,6 +793,7 @@ impl App {
                 messages: &mut self.state.messages,
                 input_mode: self.state.input_mode,
                 gateway_status: self.state.gateway_status,
+                loading_line: self.state.loading_line.clone(),
             };
 
             let _ = self.header.draw(frame, chunks[0], &ps);
@@ -796,11 +808,6 @@ impl App {
             // API key dialog overlay
             if let Some(ref dialog) = self.api_key_dialog {
                 Self::draw_api_key_dialog(frame, area, dialog);
-            }
-
-            // Fetch-loading spinner overlay
-            if let Some(ref loading) = self.fetch_loading {
-                Self::draw_fetch_loading(frame, area, loading);
             }
 
             // Model selector dialog overlay
@@ -1112,7 +1119,7 @@ impl App {
     // ── Model selector dialog ───────────────────────────────────────────────
 
     /// Spawn a background task to fetch models and send the result back
-    /// via the action channel.  Shows a loading spinner in the meantime.
+    /// via the action channel.  Shows an inline loading line in the meantime.
     fn spawn_fetch_models(&mut self, provider: String) {
         let display = providers::display_name_for_provider(&provider).to_string();
         self.state.messages.push(format!(
@@ -1120,7 +1127,12 @@ impl App {
             display,
         ));
 
-        // Show the loading spinner overlay
+        // Show the inline loading line under the chat log
+        let spinner = SPINNER_FRAMES[0];
+        self.state.loading_line = Some(format!(
+            "  {} Fetching models from {}…",
+            spinner, display,
+        ));
         self.fetch_loading = Some(FetchModelsLoading {
             display: display.clone(),
             tick: 0,
@@ -1147,84 +1159,27 @@ impl App {
         let provider_clone = provider.clone();
 
         tokio::spawn(async move {
-            let models = providers::fetch_models(
+            match providers::fetch_models(
                 &provider_clone,
                 api_key.as_deref(),
                 base_url.as_deref(),
             )
-            .await;
-
-            if models.is_empty() {
-                let _ = tx.send(Action::FetchModelsFailed(format!(
-                    "No models found for {}. Set one manually with /model <name>.",
-                    providers::display_name_for_provider(&provider_clone),
-                )));
-            } else {
-                let _ = tx.send(Action::ShowModelSelector {
-                    provider: provider_clone,
-                    models,
-                });
+            .await
+            {
+                Ok(models) => {
+                    let _ = tx.send(Action::ShowModelSelector {
+                        provider: provider_clone,
+                        models,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(Action::FetchModelsFailed(err));
+                }
             }
         });
     }
 
     /// Draw a centered loading spinner overlay.
-    fn draw_fetch_loading(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        loading: &FetchModelsLoading,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-
-        let dialog_w = 44.min(area.width.saturating_sub(4));
-        let dialog_h = 5_u16.min(area.height.saturating_sub(4)).max(3);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let block = Block::default()
-            .title(Span::styled(
-                " Fetching Models ",
-                tp::title_focused(),
-            ))
-            .title_bottom(
-                Line::from(Span::styled(
-                    " Esc to cancel ",
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let spinner_char = SPINNER_FRAMES[loading.tick % SPINNER_FRAMES.len()];
-        let text = format!(
-            "  {} Fetching models from {}…",
-            spinner_char, loading.display,
-        );
-
-        if inner.height >= 1 {
-            let line_y = inner.y + inner.height / 2;
-            let line = Line::from(vec![
-                Span::styled(
-                    &text,
-                    Style::default().fg(tp::ACCENT_BRIGHT),
-                ),
-            ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, line_y, inner.width, 1),
-            );
-        }
-    }
-
     /// Open the model selector dialog with the given list.
     fn open_model_selector(&mut self, provider: String, models: Vec<String>) {
         let display = providers::display_name_for_provider(&provider).to_string();

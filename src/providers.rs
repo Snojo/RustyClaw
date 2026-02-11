@@ -128,16 +128,16 @@ pub fn base_url_for_provider(id: &str) -> Option<&'static str> {
 
 /// Fetch the list of available models from a provider's API.
 ///
-/// Uses the provider's API key (if required) and base URL to query the
-/// models endpoint.  Falls back to the static catalogue on any error.
+/// Returns `Err` with a human-readable message on any failure — no silent
+/// fallbacks.  Callers should display the error to the user.
 pub async fn fetch_models(
     provider_id: &str,
     api_key: Option<&str>,
     base_url_override: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let def = match provider_by_id(provider_id) {
         Some(d) => d,
-        None => return Vec::new(),
+        None => return Err(format!("Unknown provider: {}", provider_id)),
     };
 
     let base = base_url_override
@@ -145,12 +145,20 @@ pub async fn fetch_models(
         .unwrap_or("");
 
     if base.is_empty() {
-        return static_models(def);
+        return Err(format!(
+            "No base URL configured for {}. Set one in config.toml or use /provider.",
+            def.display,
+        ));
+    }
+
+    // Anthropic has no public models endpoint
+    if provider_id == "anthropic" {
+        return Err(format!(
+            "Anthropic does not provide a models API. Set a model manually with /model <name>.",
+        ));
     }
 
     let result = match provider_id {
-        // Anthropic has no public models endpoint — always static
-        "anthropic" => return static_models(def),
         // Google Gemini uses a different response shape
         "google" => fetch_google_models(base, api_key).await,
         // Ollama — no auth needed, OpenAI-compatible /v1/models
@@ -160,14 +168,13 @@ pub async fn fetch_models(
     };
 
     match result {
-        Ok(models) if !models.is_empty() => models,
-        _ => static_models(def),
+        Ok(models) if models.is_empty() => Err(format!(
+            "The {} API returned an empty model list.",
+            def.display,
+        )),
+        Ok(models) => Ok(models),
+        Err(e) => Err(format!("Failed to fetch models from {}: {}", def.display, e)),
     }
-}
-
-/// Convert the static catalogue to owned strings.
-fn static_models(def: &ProviderDef) -> Vec<String> {
-    def.models.iter().map(|s| s.to_string()).collect()
 }
 
 /// Fetch from an OpenAI-compatible `/models` endpoint.
@@ -212,6 +219,7 @@ async fn fetch_google_models(
 ) -> Result<Vec<String>, reqwest::Error> {
     let key = match api_key {
         Some(k) => k,
+        // No key — return empty so the outer match produces a clear error
         None => return Ok(Vec::new()),
     };
 

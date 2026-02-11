@@ -58,7 +58,10 @@ impl Pane for MessagesPane {
                 self.focused = false;
             }
             Action::Down => {
-                if self.scroll_offset + 1 < state.messages.len() {
+                // Total items = messages + optional loading line
+                let total = state.messages.len()
+                    + if state.loading_line.is_some() { 1 } else { 0 };
+                if self.scroll_offset + 1 < total {
                     self.scroll_offset += 1;
                 }
             }
@@ -66,9 +69,18 @@ impl Pane for MessagesPane {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
             }
             Action::Update => {
-                // Auto-scroll to bottom on new messages
-                if !state.messages.is_empty() {
-                    self.scroll_offset = state.messages.len().saturating_sub(1);
+                // Auto-scroll to bottom on new messages (and loading line)
+                let total = state.messages.len()
+                    + if state.loading_line.is_some() { 1 } else { 0 };
+                if total > 0 {
+                    self.scroll_offset = total.saturating_sub(1);
+                }
+            }
+            Action::Tick => {
+                // Keep the loading line pinned to the bottom while active
+                if state.loading_line.is_some() {
+                    let total = state.messages.len() + 1;
+                    self.scroll_offset = total.saturating_sub(1);
                 }
             }
             _ => {}
@@ -77,7 +89,7 @@ impl Pane for MessagesPane {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, state: &PaneState<'_>) -> Result<()> {
-        let items: Vec<ListItem> = state
+        let mut items: Vec<ListItem> = state
             .messages
             .iter()
             .map(|m| {
@@ -91,6 +103,16 @@ impl Pane for MessagesPane {
                 ListItem::new(m.as_str()).style(style)
             })
             .collect();
+
+        // Append the animated loading line at the bottom when active
+        if let Some(ref line) = state.loading_line {
+            items.push(
+                ListItem::new(line.as_str())
+                    .style(Style::default().fg(tp::ACCENT_BRIGHT)),
+            );
+        }
+
+        let total = items.len();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL))
@@ -118,7 +140,7 @@ impl Pane for MessagesPane {
                         format!(
                             " {} of {} ",
                             self.scroll_offset.saturating_add(1),
-                            state.messages.len()
+                            total
                         ),
                         Style::default().fg(tp::MUTED),
                     ))
