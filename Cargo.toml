@@ -27,6 +27,9 @@ securestore = "0.100.0"
 # TOTP 2FA support
 totp-rs = { version = "5.7", features = ["gen_secret", "otpauth"] }
 
+# SSH key generation (Ed25519)
+ssh-key = { version = "0.6", features = ["ed25519", "getrandom", "std"] }
+
 # File system and path handling
 dirs = "5.0"
 

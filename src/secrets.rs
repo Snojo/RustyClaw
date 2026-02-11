@@ -4,12 +4,114 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use totp_rs::{Algorithm, TOTP, Secret as TotpSecret};
 
+// ── Credential types ────────────────────────────────────────────────────────
+
+/// What kind of secret a credential entry holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKind {
+    /// Bearer / API token (single opaque string).
+    ApiKey,
+    /// HTTP passkey (WebAuthn-style credential id + secret).
+    HttpPasskey,
+    /// Username + password pair.
+    UsernamePassword,
+    /// SSH keypair (Ed25519).  The private key is stored in the vault;
+    /// the public key is also written to `<credentials_dir>/rustyclaw_agent.pub`.
+    SshKey,
+    /// Generic single-value token (OAuth tokens, bot tokens, etc.).
+    Token,
+    /// Catch-all for anything that doesn't fit the above.
+    Other,
+}
+
+/// Controls *when* the agent is allowed to read a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessPolicy {
+    /// The agent may read this secret at any time without prompting.
+    Always,
+    /// The agent may read this secret only with explicit per-use user
+    /// approval (e.g. a "yes/no" confirmation in the TUI).
+    WithApproval,
+    /// The agent must re-authenticate (vault password and/or TOTP)
+    /// before each access.
+    WithAuth,
+    /// The secret is only available when the agent is executing one of
+    /// the named skills.  An empty list means "no skill may access it"
+    /// (effectively locked).
+    SkillOnly(Vec<String>),
+}
+
+impl Default for AccessPolicy {
+    fn default() -> Self {
+        Self::WithApproval
+    }
+}
+
+/// Metadata envelope stored alongside the secret value(s) in the vault.
+///
+/// This is JSON-serialized and stored under the key `cred:<name>`.
+/// The actual sensitive values live under `val:<name>` (and for
+/// `UsernamePassword`, also `val:<name>:user`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretEntry {
+    /// Human-readable label (e.g. "Anthropic API key").
+    pub label: String,
+    /// What kind of credential this is.
+    pub kind: SecretKind,
+    /// Who (or what) is allowed to read the secret.
+    pub policy: AccessPolicy,
+    /// Optional free-form description / notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The result of reading a credential — includes the metadata envelope
+/// plus the decrypted value(s).
+#[derive(Debug, Clone)]
+pub enum CredentialValue {
+    /// A single opaque string (ApiKey, Token, HttpPasskey, Other).
+    Single(String),
+    /// Username + password pair.
+    UserPass { username: String, password: String },
+    /// SSH keypair — private key in OpenSSH PEM format, public key in
+    /// `ssh-ed25519 AAAA…` format.
+    SshKeyPair { private_key: String, public_key: String },
+}
+
+/// Context supplied by the caller when requesting access to a
+/// credential.  The [`SecretsManager`] evaluates this against the
+/// credential's [`AccessPolicy`].
+#[derive(Debug, Clone, Default)]
+pub struct AccessContext {
+    /// The user explicitly approved this specific access.
+    pub user_approved: bool,
+    /// The caller has re-verified the vault password and/or TOTP
+    /// within this request.
+    pub authenticated: bool,
+    /// The name of the skill currently being executed, if any.
+    pub active_skill: Option<String>,
+}
+
 /// Secrets manager backed by an encrypted SecureStore vault.
 ///
-/// The vault is stored at `{settings_dir}/secrets.json`.  Encryption uses
-/// either a CSPRNG-generated key file (`{settings_dir}/secrets.key`) or a
+/// The vault is stored at `{credentials_dir}/secrets.json`.  Encryption uses
+/// either a CSPRNG-generated key file (`{credentials_dir}/secrets.key`) or a
 /// user-supplied password — never both.
+///
+/// ## Storage layout
+///
+/// | Key pattern          | Content                                      |
+/// |----------------------|----------------------------------------------|
+/// | `cred:<name>`        | JSON-serialized [`SecretEntry`] metadata      |
+/// | `val:<name>`         | Primary secret value (or private key PEM)     |
+/// | `val:<name>:user`    | Username (for `UsernamePassword` kind)         |
+/// | `val:<name>:pub`     | Public key string (for `SshKey` kind)          |
+/// | `<bare key>`         | Legacy / raw secrets (API keys, TOTP, etc.)   |
 pub struct SecretsManager {
+    /// Root credentials directory (for writing SSH pubkey file, etc.)
+    credentials_dir: PathBuf,
     /// Path to the vault JSON file
     vault_path: PathBuf,
     /// Path to the key file (only used when no password is set)
@@ -22,6 +124,7 @@ pub struct SecretsManager {
     agent_access_enabled: bool,
 }
 
+/// Kept for backward compatibility with older code that references this type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Secret {
     pub key: String,
@@ -36,6 +139,7 @@ impl SecretsManager {
     pub fn new(credentials_dir: impl Into<PathBuf>) -> Self {
         let dir: PathBuf = credentials_dir.into();
         Self {
+            credentials_dir: dir.clone(),
             vault_path: dir.join("secrets.json"),
             key_path: dir.join("secrets.key"),
             password: None,
@@ -49,6 +153,7 @@ impl SecretsManager {
     pub fn with_password(credentials_dir: impl Into<PathBuf>, password: String) -> Self {
         let dir: PathBuf = credentials_dir.into();
         Self {
+            credentials_dir: dir.clone(),
             vault_path: dir.join("secrets.json"),
             key_path: dir.join("secrets.key"),
             password: Some(password),
@@ -179,6 +284,225 @@ impl SecretsManager {
         match self.ensure_vault() {
             Ok(vault) => vault.keys().map(|s| s.to_string()).collect(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    // ── Typed credential API ────────────────────────────────────────
+
+    /// Store a typed credential in the vault.
+    ///
+    /// For `UsernamePassword`, supply the password as `value` and the
+    /// username as `username`.  For all other kinds, `username` is
+    /// ignored and `value` holds the single secret string.
+    ///
+    /// For `SshKey`, prefer [`generate_ssh_key`] which creates the
+    /// keypair automatically.
+    pub fn store_credential(
+        &mut self,
+        name: &str,
+        entry: &SecretEntry,
+        value: &str,
+        username: Option<&str>,
+    ) -> Result<()> {
+        let meta_key = format!("cred:{}", name);
+        let val_key = format!("val:{}", name);
+
+        let meta_json = serde_json::to_string(entry)
+            .context("Failed to serialize credential metadata")?;
+        self.store_secret(&meta_key, &meta_json)?;
+        self.store_secret(&val_key, value)?;
+
+        if entry.kind == SecretKind::UsernamePassword {
+            let user_key = format!("val:{}:user", name);
+            self.store_secret(&user_key, username.unwrap_or(""))?;
+        }
+
+        Ok(())
+    }
+
+    /// Retrieve a typed credential from the vault.
+    ///
+    /// `context` drives the permission check:
+    /// - `user_approved`: the user has explicitly said "yes" for this
+    ///   access (satisfies `WithApproval`).
+    /// - `authenticated`: the caller has already re-verified the vault
+    ///   password / TOTP (satisfies `WithAuth`).
+    /// - `active_skill`: if the agent is currently executing a skill,
+    ///   pass its name here (satisfies `SkillOnly` when listed).
+    pub fn get_credential(
+        &mut self,
+        name: &str,
+        ctx: &AccessContext,
+    ) -> Result<Option<(SecretEntry, CredentialValue)>> {
+        let meta_key = format!("cred:{}", name);
+        let val_key = format!("val:{}", name);
+
+        // Load metadata.
+        let meta_json = match self.get_secret(&meta_key, true)? {
+            Some(j) => j,
+            None => return Ok(None),
+        };
+        let entry: SecretEntry = serde_json::from_str(&meta_json)
+            .context("Corrupted credential metadata")?;
+
+        // ── Policy check ───────────────────────────────────────────
+        if !self.check_access(&entry.policy, ctx) {
+            anyhow::bail!(
+                "Access denied for credential '{}' (policy: {:?})",
+                name,
+                entry.policy,
+            );
+        }
+
+        // ── Load value(s) ──────────────────────────────────────────
+        let value = match entry.kind {
+            SecretKind::UsernamePassword => {
+                let password = self.get_secret(&val_key, true)?
+                    .unwrap_or_default();
+                let user_key = format!("val:{}:user", name);
+                let username = self.get_secret(&user_key, true)?
+                    .unwrap_or_default();
+                CredentialValue::UserPass { username, password }
+            }
+            SecretKind::SshKey => {
+                let private_key = self.get_secret(&val_key, true)?
+                    .unwrap_or_default();
+                let pub_key = format!("val:{}:pub", name);
+                let public_key = self.get_secret(&pub_key, true)?
+                    .unwrap_or_default();
+                CredentialValue::SshKeyPair { private_key, public_key }
+            }
+            _ => {
+                let v = self.get_secret(&val_key, true)?
+                    .unwrap_or_default();
+                CredentialValue::Single(v)
+            }
+        };
+
+        Ok(Some((entry, value)))
+    }
+
+    /// List all typed credential names (not raw / legacy keys).
+    pub fn list_credentials(&mut self) -> Vec<(String, SecretEntry)> {
+        let keys = self.list_secrets();
+        let mut result = Vec::new();
+        for key in &keys {
+            if let Some(name) = key.strip_prefix("cred:") {
+                if let Ok(Some(json)) = self.get_secret(key, true) {
+                    if let Ok(entry) = serde_json::from_str::<SecretEntry>(&json) {
+                        result.push((name.to_string(), entry));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Delete a typed credential and all its associated vault keys.
+    pub fn delete_credential(&mut self, name: &str) -> Result<()> {
+        let meta_key = format!("cred:{}", name);
+        let val_key = format!("val:{}", name);
+        let user_key = format!("val:{}:user", name);
+        let pub_key = format!("val:{}:pub", name);
+
+        // Best-effort removal of all possible sub-keys.
+        let _ = self.delete_secret(&meta_key);
+        let _ = self.delete_secret(&val_key);
+        let _ = self.delete_secret(&user_key);
+        let _ = self.delete_secret(&pub_key);
+
+        // Also remove the pubkey file if it exists.
+        let pubkey_path = self.credentials_dir.join(format!("{}.pub", name));
+        let _ = std::fs::remove_file(pubkey_path);
+
+        Ok(())
+    }
+
+    // ── SSH key generation ──────────────────────────────────────────
+
+    /// Generate a new Ed25519 SSH keypair, store it in the vault as
+    /// an `SshKey` credential, and write the public key to
+    /// `<credentials_dir>/<name>.pub`.
+    ///
+    /// Returns the public key string (`ssh-ed25519 AAAA… <comment>`).
+    pub fn generate_ssh_key(
+        &mut self,
+        name: &str,
+        comment: &str,
+        policy: AccessPolicy,
+    ) -> Result<String> {
+        use ssh_key::private::PrivateKey;
+
+        // Generate keypair.
+        let private = PrivateKey::random(
+            &mut ssh_key::rand_core::OsRng,
+            ssh_key::Algorithm::Ed25519,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to generate SSH key: {}", e))?;
+
+        let private_pem = private
+            .to_openssh(ssh_key::LineEnding::LF)
+            .map_err(|e| anyhow::anyhow!("Failed to encode private key: {}", e))?;
+
+        let public = private.public_key();
+        let public_openssh = public.to_openssh()
+            .map_err(|e| anyhow::anyhow!("Failed to encode public key: {}", e))?;
+
+        let public_str = if comment.is_empty() {
+            public_openssh.to_string()
+        } else {
+            format!("{} {}", public_openssh, comment)
+        };
+
+        // Store in vault.
+        let entry = SecretEntry {
+            label: format!("SSH key ({})", name),
+            kind: SecretKind::SshKey,
+            policy,
+            description: Some(format!("Ed25519 keypair — {}", comment)),
+        };
+
+        let meta_key = format!("cred:{}", name);
+        let val_key = format!("val:{}", name);
+        let pub_vault_key = format!("val:{}:pub", name);
+
+        let meta_json = serde_json::to_string(&entry)
+            .context("Failed to serialize credential metadata")?;
+        self.store_secret(&meta_key, &meta_json)?;
+        self.store_secret(&val_key, private_pem.to_string().as_str())?;
+        self.store_secret(&pub_vault_key, &public_str)?;
+
+        // Write public key file.
+        let pubkey_path = self.credentials_dir.join(format!("{}.pub", name));
+        std::fs::write(&pubkey_path, &public_str)
+            .context("Failed to write SSH public key file")?;
+
+        Ok(public_str)
+    }
+
+    /// Path to the SSH public key file for a given credential name.
+    pub fn ssh_pubkey_path(&self, name: &str) -> PathBuf {
+        self.credentials_dir.join(format!("{}.pub", name))
+    }
+
+    // ── Access policy enforcement ───────────────────────────────────
+
+    /// Evaluate whether the given [`AccessContext`] satisfies a
+    /// credential's [`AccessPolicy`].
+    fn check_access(&self, policy: &AccessPolicy, ctx: &AccessContext) -> bool {
+        match policy {
+            AccessPolicy::Always => true,
+            AccessPolicy::WithApproval => {
+                ctx.user_approved || self.agent_access_enabled
+            }
+            AccessPolicy::WithAuth => ctx.authenticated,
+            AccessPolicy::SkillOnly(allowed) => {
+                if let Some(ref skill) = ctx.active_skill {
+                    allowed.iter().any(|s| s == skill)
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -448,6 +772,282 @@ mod tests {
         // Remove TOTP.
         manager.remove_totp().unwrap();
         assert!(!manager.has_totp());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Typed credential tests ──────────────────────────────────────
+
+    #[test]
+    fn test_store_and_retrieve_api_key() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let entry = SecretEntry {
+            label: "Anthropic".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::WithApproval,
+            description: None,
+        };
+        m.store_credential("anthropic_key", &entry, "sk-ant-12345", None).unwrap();
+
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        let (meta, val) = m.get_credential("anthropic_key", &ctx).unwrap().unwrap();
+        assert_eq!(meta.kind, SecretKind::ApiKey);
+        assert_eq!(meta.label, "Anthropic");
+        match val {
+            CredentialValue::Single(v) => assert_eq!(v, "sk-ant-12345"),
+            _ => panic!("Expected Single"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_store_and_retrieve_username_password() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let entry = SecretEntry {
+            label: "Registry".to_string(),
+            kind: SecretKind::UsernamePassword,
+            policy: AccessPolicy::Always,
+            description: None,
+        };
+        m.store_credential("registry", &entry, "s3cret", Some("admin")).unwrap();
+
+        let ctx = AccessContext::default();
+        let (_, val) = m.get_credential("registry", &ctx).unwrap().unwrap();
+        match val {
+            CredentialValue::UserPass { username, password } => {
+                assert_eq!(username, "admin");
+                assert_eq!(password, "s3cret");
+            }
+            _ => panic!("Expected UserPass"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_store_http_passkey() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let entry = SecretEntry {
+            label: "WebAuthn passkey".to_string(),
+            kind: SecretKind::HttpPasskey,
+            policy: AccessPolicy::WithAuth,
+            description: Some("FIDO2 credential".to_string()),
+        };
+        m.store_credential("passkey1", &entry, "cred-id-base64", None).unwrap();
+
+        // Access without authentication should be denied.
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        assert!(m.get_credential("passkey1", &ctx).is_err());
+
+        // Access with authentication should succeed.
+        let ctx = AccessContext { authenticated: true, ..Default::default() };
+        let (meta, val) = m.get_credential("passkey1", &ctx).unwrap().unwrap();
+        assert_eq!(meta.kind, SecretKind::HttpPasskey);
+        match val {
+            CredentialValue::Single(v) => assert_eq!(v, "cred-id-base64"),
+            _ => panic!("Expected Single"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_generate_ssh_key() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let pubkey = m.generate_ssh_key(
+            "rustyclaw_agent", "rustyclaw@agent", AccessPolicy::WithApproval,
+        ).unwrap();
+
+        assert!(pubkey.starts_with("ssh-ed25519 "));
+        assert!(pubkey.contains("rustyclaw@agent"));
+
+        // Public key file should exist on disk.
+        let pubkey_path = dir.join("rustyclaw_agent.pub");
+        assert!(pubkey_path.exists());
+        let on_disk = std::fs::read_to_string(&pubkey_path).unwrap();
+        assert_eq!(on_disk, pubkey);
+
+        // Retrieve via typed API.
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        let (meta, val) = m.get_credential("rustyclaw_agent", &ctx).unwrap().unwrap();
+        assert_eq!(meta.kind, SecretKind::SshKey);
+        match val {
+            CredentialValue::SshKeyPair { private_key, public_key } => {
+                assert!(private_key.contains("BEGIN OPENSSH PRIVATE KEY"));
+                assert!(public_key.starts_with("ssh-ed25519 "));
+            }
+            _ => panic!("Expected SshKeyPair"),
+        }
+
+        // Delete should clean up the pubkey file too.
+        m.delete_credential("rustyclaw_agent").unwrap();
+        assert!(!pubkey_path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_credentials() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+
+        let e1 = SecretEntry {
+            label: "Key A".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::Always,
+            description: None,
+        };
+        let e2 = SecretEntry {
+            label: "Key B".to_string(),
+            kind: SecretKind::Token,
+            policy: AccessPolicy::WithApproval,
+            description: None,
+        };
+        m.store_credential("a", &e1, "val_a", None).unwrap();
+        m.store_credential("b", &e2, "val_b", None).unwrap();
+
+        // Also store a raw legacy secret — should NOT appear in list_credentials.
+        m.store_secret("legacy_key", "legacy_val").unwrap();
+
+        let creds = m.list_credentials();
+        let names: Vec<&str> = creds.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+        assert!(!names.contains(&"legacy_key"));
+        assert_eq!(creds.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Access policy tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_policy_always() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+        let entry = SecretEntry {
+            label: "open".to_string(),
+            kind: SecretKind::Token,
+            policy: AccessPolicy::Always,
+            description: None,
+        };
+        m.store_credential("open_tok", &entry, "val", None).unwrap();
+
+        // Should succeed with an empty context.
+        let ctx = AccessContext::default();
+        assert!(m.get_credential("open_tok", &ctx).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_policy_with_approval_denied() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+        let entry = SecretEntry {
+            label: "guarded".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::WithApproval,
+            description: None,
+        };
+        m.store_credential("guarded", &entry, "val", None).unwrap();
+
+        // No approval, no agent_access → denied.
+        let ctx = AccessContext::default();
+        assert!(m.get_credential("guarded", &ctx).is_err());
+
+        // With approval → ok.
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        assert!(m.get_credential("guarded", &ctx).unwrap().is_some());
+
+        // With agent_access enabled → also ok.
+        m.set_agent_access(true);
+        let ctx = AccessContext::default();
+        assert!(m.get_credential("guarded", &ctx).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_policy_with_auth() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+        let entry = SecretEntry {
+            label: "high-sec".to_string(),
+            kind: SecretKind::ApiKey,
+            policy: AccessPolicy::WithAuth,
+            description: None,
+        };
+        m.store_credential("hs", &entry, "val", None).unwrap();
+
+        // Even with user_approved, needs authenticated.
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        assert!(m.get_credential("hs", &ctx).is_err());
+
+        let ctx = AccessContext { authenticated: true, ..Default::default() };
+        assert!(m.get_credential("hs", &ctx).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_policy_skill_only() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+        let entry = SecretEntry {
+            label: "deploy-key".to_string(),
+            kind: SecretKind::Token,
+            policy: AccessPolicy::SkillOnly(vec!["deploy".to_string(), "ci".to_string()]),
+            description: None,
+        };
+        m.store_credential("dk", &entry, "val", None).unwrap();
+
+        // No skill → denied.
+        let ctx = AccessContext { user_approved: true, ..Default::default() };
+        assert!(m.get_credential("dk", &ctx).is_err());
+
+        // Wrong skill → denied.
+        let ctx = AccessContext {
+            active_skill: Some("build".to_string()),
+            ..Default::default()
+        };
+        assert!(m.get_credential("dk", &ctx).is_err());
+
+        // Correct skill → ok.
+        let ctx = AccessContext {
+            active_skill: Some("deploy".to_string()),
+            ..Default::default()
+        };
+        assert!(m.get_credential("dk", &ctx).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_credential() {
+        let dir = temp_dir();
+        let mut m = SecretsManager::new(&dir);
+        let entry = SecretEntry {
+            label: "tmp".to_string(),
+            kind: SecretKind::Token,
+            policy: AccessPolicy::Always,
+            description: None,
+        };
+        m.store_credential("tmp", &entry, "val", None).unwrap();
+        assert_eq!(m.list_credentials().len(), 1);
+
+        m.delete_credential("tmp").unwrap();
+        assert_eq!(m.list_credentials().len(), 0);
+
+        // get_credential should return None now.
+        let ctx = AccessContext::default();
+        assert!(m.get_credential("tmp", &ctx).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -126,6 +126,9 @@ pub fn run_onboard_wizard(
 
         // ── 1b. Optional TOTP 2FA ──────────────────────────────────
         setup_totp_enrollment(&mut reader, config, secrets)?;
+
+        // ── 1c. Agent SSH key ──────────────────────────────────────
+        setup_agent_ssh_key(&mut reader, secrets)?;
     } else {
         // ── Existing vault — unlock it ─────────────────────────────
         if config.secrets_password_protected {
@@ -195,6 +198,9 @@ pub fn run_onboard_wizard(
             } else {
                 setup_totp_enrollment(&mut reader, config, secrets)?;
             }
+
+            // ── Agent SSH key ──────────────────────────────────────
+            setup_agent_ssh_key(&mut reader, secrets)?;
         } else {
             println!("  {}", t::muted("Keeping current vault settings."));
         }
@@ -715,6 +721,71 @@ fn verify_totp_loop(
             }
         }
     }
+}
+
+/// Offer to generate an Ed25519 SSH key for the agent.
+fn setup_agent_ssh_key(
+    reader: &mut impl BufRead,
+    secrets: &mut SecretsManager,
+) -> Result<()> {
+    use crate::secrets::AccessPolicy;
+
+    // Check if one already exists.
+    let has_key = secrets.list_credentials()
+        .iter()
+        .any(|(n, _)| n == "rustyclaw_agent");
+
+    if has_key {
+        println!("{}", t::bold("Agent SSH key:"));
+        let pubkey_path = secrets.ssh_pubkey_path("rustyclaw_agent");
+        println!("  {} already generated.",
+            t::icon_ok(&format!("SSH key {}", t::info(&pubkey_path.display().to_string()))));
+        let regen = prompt_line(
+            reader,
+            &format!("{} ", t::accent("Regenerate agent SSH key? [y/N]:")),
+        )?;
+        if !regen.trim().eq_ignore_ascii_case("y") {
+            println!("  {}", t::muted("Keeping existing key."));
+            println!();
+            return Ok(());
+        }
+        secrets.delete_credential("rustyclaw_agent")?;
+    }
+
+    println!("{}", t::bold("Agent SSH key (optional):"));
+    println!();
+    println!("  RustyClaw can have its own Ed25519 SSH key, separate");
+    println!("  from your personal keys.  This is useful for git");
+    println!("  operations, deploy access, and remote connections");
+    println!("  performed by the agent.");
+    println!();
+
+    let gen = prompt_line(
+        reader,
+        &format!("{} ", t::accent("Generate an agent SSH key? [y/N]:")),
+    )?;
+
+    if gen.trim().eq_ignore_ascii_case("y") {
+        let comment = format!("rustyclaw-agent@{}", whoami());
+        let pubkey = secrets.generate_ssh_key(
+            "rustyclaw_agent",
+            &comment,
+            AccessPolicy::WithApproval,
+        )?;
+        println!();
+        println!("  {}", t::icon_ok("Agent SSH key generated."));
+        println!();
+        println!("  {}", t::bold("Public key:"));
+        println!("  {}", t::info(&pubkey));
+        println!();
+        let pubkey_path = secrets.ssh_pubkey_path("rustyclaw_agent");
+        println!("  Written to: {}", t::info(&pubkey_path.display().to_string()));
+        println!("  Add it to your Git host or authorized_keys as needed.");
+    } else {
+        println!("  {}", t::muted("Skipping agent SSH key. You can generate one later."));
+    }
+    println!();
+    Ok(())
 }
 
 /// Interactive arrow-key selector.
