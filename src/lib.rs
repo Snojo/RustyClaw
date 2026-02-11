@@ -3,6 +3,7 @@ pub mod app;
 pub mod args;
 pub mod commands;
 pub mod config;
+pub mod daemon;
 pub mod gateway;
 pub mod messenger;
 pub mod onboard;

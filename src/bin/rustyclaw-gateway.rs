@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use rustyclaw::args::CommonArgs;
 use rustyclaw::config::Config;
+use rustyclaw::daemon;
 use rustyclaw::gateway::{run_gateway, GatewayOptions};
 use rustyclaw::theme as t;
 use tokio_util::sync::CancellationToken;
@@ -130,6 +131,41 @@ async fn main() -> Result<()> {
 
     println!("{}", t::icon_ok(&format!("Gateway listening on {}", t::info(&format!("ws://{}", listen)))));
 
+    // Write PID file so `rustyclaw gateway stop` can find us.
+    let pid = std::process::id();
+    daemon::write_pid(&config.settings_dir, pid)?;
+
+    // Set up graceful shutdown on Ctrl+C (all platforms).
     let cancel = CancellationToken::new();
-    run_gateway(config, GatewayOptions { listen }, cancel).await
+    let cancel_for_signal = cancel.clone();
+    let settings_dir = config.settings_dir.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel_for_signal.cancel();
+    });
+
+    // On Unix, also handle SIGTERM for graceful shutdown when stopped via
+    // `rustyclaw gateway stop` (which sends SIGTERM through sysinfo).
+    // Windows doesn't have SIGTERM — sysinfo uses TerminateProcess there,
+    // so no signal handler is needed; the PID-file cleanup below covers it.
+    #[cfg(unix)]
+    {
+        let cancel_for_term = cancel.clone();
+        let settings_dir_term = settings_dir.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                sig.recv().await;
+                cancel_for_term.cancel();
+                daemon::remove_pid(&settings_dir_term);
+            }
+        });
+    }
+
+    let result = run_gateway(config, GatewayOptions { listen }, cancel).await;
+
+    // Clean up PID file on exit.
+    daemon::remove_pid(&settings_dir);
+
+    result
 }

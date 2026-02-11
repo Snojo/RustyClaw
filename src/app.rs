@@ -377,16 +377,14 @@ impl App {
 
     /// Start the gateway server in-process, then connect to it as a client.
     async fn start_gateway(&mut self) {
-        let url = match &self.state.config.gateway_url {
-            Some(u) => u.clone(),
-            None => {
-                self.state.gateway_status = GatewayStatus::Unconfigured;
-                self.state
-                    .messages
-                    .push("No gateway URL configured. Use --gateway ws://... or set gateway_url in config.toml".to_string());
-                return;
-            }
-        };
+        const DEFAULT_GATEWAY_URL: &str = "ws://127.0.0.1:9001";
+
+        let url = self
+            .state
+            .config
+            .gateway_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string());
 
         // If already running, report and return.
         if self.gateway_task.is_some() {

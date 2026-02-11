@@ -37,7 +37,12 @@ tokio-tungstenite = "0.21"
 url = "2.5"
 tui-input = "0.8"
 strum = { version = "0.26", features = ["derive"] }
+sysinfo = "0.33"
+which = "7"
 
 # Terminal styling
 colored = "2.1"
 indicatif = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

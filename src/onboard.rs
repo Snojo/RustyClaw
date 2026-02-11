@@ -164,14 +164,15 @@ pub fn run_onboard_wizard(
             println!("  {}", t::icon_ok("Using auto-generated key file (no password)."));
             config.secrets_password_protected = false;
         } else {
-            let confirm = prompt_secret(&mut reader, &format!("{} ", t::accent("Confirm password:")))?;
-            if confirm.trim() != pw {
-                println!("  {}", t::icon_warn("Passwords do not match — falling back to key file."));
-                config.secrets_password_protected = false;
-            } else {
-                secrets.set_password(pw);
-                config.secrets_password_protected = true;
-                println!("  {}", t::icon_ok("Secrets vault will be password-protected."));
+            loop {
+                let confirm = prompt_secret(&mut reader, &format!("{} ", t::accent("Confirm password:")))?;
+                if confirm.trim() == pw {
+                    secrets.set_password(pw);
+                    config.secrets_password_protected = true;
+                    println!("  {}", t::icon_ok("Secrets vault will be password-protected."));
+                    break;
+                }
+                println!("  {}", t::icon_warn("Passwords do not match — please try again."));
             }
         }
         println!();
