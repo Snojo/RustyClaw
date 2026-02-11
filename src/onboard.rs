@@ -296,9 +296,9 @@ fn perform_device_flow_auth(
     println!();
 
     // Start the device flow
-    let runtime = tokio::runtime::Runtime::new()?;
-    let auth_response = runtime.block_on(async {
-        crate::providers::start_device_flow(device_config).await
+    let handle = tokio::runtime::Handle::current();
+    let auth_response = tokio::task::block_in_place(|| {
+        handle.block_on(crate::providers::start_device_flow(device_config))
     }).map_err(|e| anyhow::anyhow!(e))?;
 
     // Display the verification URL and code to the user
@@ -316,18 +316,18 @@ fn perform_device_flow_auth(
 
     // Poll for the token
     println!("  {}", t::muted("Waiting for authorization..."));
-    
+
     // Use the server-provided interval, which is typically 5 seconds for GitHub.
     // This respects GitHub's rate limiting and follows OAuth 2.0 device flow best practices.
     let interval = std::time::Duration::from_secs(auth_response.interval);
-    
+
     // Calculate max attempts based on expiration time and interval
     let max_attempts = (auth_response.expires_in / auth_response.interval).max(10);
-    
+
     let mut token: Option<String> = None;
     for _attempt in 0..max_attempts {
-        match runtime.block_on(async {
-            crate::providers::poll_device_token(device_config, &auth_response.device_code).await
+        match tokio::task::block_in_place(|| {
+            handle.block_on(crate::providers::poll_device_token(device_config, &auth_response.device_code))
         }) {
             Ok(Some(access_token)) => {
                 token = Some(access_token);

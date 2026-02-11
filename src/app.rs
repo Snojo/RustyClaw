@@ -116,6 +116,8 @@ pub struct App {
     model_selector: Option<ModelSelectorState>,
     /// Loading spinner shown while fetching models
     fetch_loading: Option<FetchModelsLoading>,
+    /// Loading spinner shown during device flow authentication
+    device_flow_loading: Option<FetchModelsLoading>,
 }
 
 /// State for the API-key input dialog overlay.
@@ -197,6 +199,7 @@ impl App {
             api_key_dialog: None,
             model_selector: None,
             fetch_loading: None,
+            device_flow_loading: None,
         })
     }
 
@@ -226,15 +229,23 @@ impl App {
                     Event::Resize(w, h) => Some(Action::Resize(*w, *h)),
                     Event::Quit => Some(Action::Quit),
                     _ => {
-                        // While loading models, Esc cancels the fetch
-                        if self.fetch_loading.is_some() {
+                        // While loading, Esc cancels the active async operation
+                        if self.fetch_loading.is_some() || self.device_flow_loading.is_some() {
                             if let Event::Key(key) = &event {
                                 if key.code == crossterm::event::KeyCode::Esc {
-                                    self.fetch_loading = None;
-                                    self.state.loading_line = None;
-                                    self.state.messages.push(
-                                        "Model fetch cancelled.".to_string(),
-                                    );
+                                    if self.device_flow_loading.is_some() {
+                                        self.device_flow_loading = None;
+                                        self.state.loading_line = None;
+                                        self.state.messages.push(
+                                            "Device flow authentication cancelled.".to_string(),
+                                        );
+                                    } else {
+                                        self.fetch_loading = None;
+                                        self.state.loading_line = None;
+                                        self.state.messages.push(
+                                            "Model fetch cancelled.".to_string(),
+                                        );
+                                    }
                                     // Consume the Esc so it doesn't propagate
                                     continue;
                                 }
@@ -385,6 +396,13 @@ impl App {
                         "  {} Fetching models from {}…",
                         spinner, loading.display,
                     ));
+                } else if let Some(ref mut loading) = self.device_flow_loading {
+                    loading.tick += 1;
+                    let spinner = SPINNER_FRAMES[loading.tick % SPINNER_FRAMES.len()];
+                    self.state.loading_line = Some(format!(
+                        "  {} Waiting for {} authorization…",
+                        spinner, loading.display,
+                    ));
                 }
                 // Fall through so panes also get Tick
             }
@@ -413,6 +431,51 @@ impl App {
                 self.state.loading_line = None;
                 self.open_model_selector(provider.clone(), models.clone());
                 return Ok(None);
+            }
+            Action::StartDeviceFlow(ref provider) => {
+                self.spawn_device_flow(provider.clone());
+                return Ok(None);
+            }
+            Action::DeviceFlowCodeReady { ref url, ref code } => {
+                self.state.messages.push(format!(
+                    "Open this URL in your browser:",
+                ));
+                self.state.messages.push(format!(
+                    "  ➜  {}", url,
+                ));
+                self.state.messages.push(format!(
+                    "Then enter this code:  {}", code,
+                ));
+                return Ok(Some(Action::Update));
+            }
+            Action::DeviceFlowAuthenticated { ref provider, ref token } => {
+                self.device_flow_loading = None;
+                self.state.loading_line = None;
+                let secret_key = providers::secret_key_for_provider(provider)
+                    .unwrap_or("COPILOT_TOKEN");
+                let display = providers::display_name_for_provider(provider).to_string();
+                match self.state.secrets_manager.store_secret(secret_key, token) {
+                    Ok(()) => {
+                        self.state.messages.push(format!(
+                            "✓ {} authenticated successfully. Token stored.",
+                            display,
+                        ));
+                    }
+                    Err(e) => {
+                        self.state.messages.push(format!(
+                            "Failed to store token: {}. Token set for this session only.",
+                            e,
+                        ));
+                    }
+                }
+                // Proceed to model selection
+                return Ok(Some(Action::FetchModels(provider.clone())));
+            }
+            Action::DeviceFlowFailed(ref msg) => {
+                self.device_flow_loading = None;
+                self.state.loading_line = None;
+                self.state.messages.push(msg.clone());
+                return Ok(Some(Action::Update));
             }
             _ => {}
         }
@@ -522,30 +585,52 @@ impl App {
                         self.state.messages.push(format!("Provider set to {}.", provider));
                     }
 
-                    // Check if the provider needs an API key
-                    if let Some(secret_key) = providers::secret_key_for_provider(provider) {
-                        match self.state.secrets_manager.get_secret(secret_key, true) {
-                            Ok(Some(_)) => {
-                                self.state.messages.push(format!(
-                                    "✓ API key for {} is already stored.",
-                                    providers::display_name_for_provider(provider),
-                                ));
-                                // Key exists — go straight to model selection
-                                return Ok(Some(Action::FetchModels(provider.clone())));
-                            }
-                            _ => {
-                                // No key found — trigger the dialog
-                                return Ok(Some(Action::PromptApiKey(provider.clone())));
+                    // Check the provider's auth method
+                    let def = providers::provider_by_id(provider);
+                    let auth_method = def.map(|d| d.auth_method)
+                        .unwrap_or(providers::AuthMethod::ApiKey);
+
+                    match auth_method {
+                        providers::AuthMethod::DeviceFlow => {
+                            // Check if we already have a token stored
+                            if let Some(secret_key) = providers::secret_key_for_provider(provider) {
+                                match self.state.secrets_manager.get_secret(secret_key, true) {
+                                    Ok(Some(_)) => {
+                                        self.state.messages.push(format!(
+                                            "✓ Access token for {} is already stored.",
+                                            providers::display_name_for_provider(provider),
+                                        ));
+                                        return Ok(Some(Action::FetchModels(provider.clone())));
+                                    }
+                                    _ => {
+                                        return Ok(Some(Action::StartDeviceFlow(provider.clone())));
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        // Provider doesn't need an API key (e.g. Ollama)
-                        self.state.messages.push(format!(
-                            "{} does not require an API key.",
-                            providers::display_name_for_provider(provider),
-                        ));
-                        // Go straight to model selection
-                        return Ok(Some(Action::FetchModels(provider.clone())));
+                        providers::AuthMethod::ApiKey => {
+                            if let Some(secret_key) = providers::secret_key_for_provider(provider) {
+                                match self.state.secrets_manager.get_secret(secret_key, true) {
+                                    Ok(Some(_)) => {
+                                        self.state.messages.push(format!(
+                                            "✓ API key for {} is already stored.",
+                                            providers::display_name_for_provider(provider),
+                                        ));
+                                        return Ok(Some(Action::FetchModels(provider.clone())));
+                                    }
+                                    _ => {
+                                        return Ok(Some(Action::PromptApiKey(provider.clone())));
+                                    }
+                                }
+                            }
+                        }
+                        providers::AuthMethod::None => {
+                            self.state.messages.push(format!(
+                                "{} does not require authentication.",
+                                providers::display_name_for_provider(provider),
+                            ));
+                            return Ok(Some(Action::FetchModels(provider.clone())));
+                        }
                     }
                 }
                 CommandAction::SetModel(ref model) => {
@@ -1180,6 +1265,106 @@ impl App {
     }
 
     /// Draw a centered loading spinner overlay.
+
+    // ── Device flow authentication ──────────────────────────────────────────
+
+    /// Spawn a background task to perform OAuth device flow authentication.
+    /// Shows the verification URL and user code as messages, then polls for
+    /// the token in the background.
+    fn spawn_device_flow(&mut self, provider: String) {
+        let def = match providers::provider_by_id(&provider) {
+            Some(d) => d,
+            None => {
+                self.state.messages.push(format!("Unknown provider: {}", provider));
+                return;
+            }
+        };
+
+        let device_config = match def.device_flow {
+            Some(cfg) => cfg,
+            None => {
+                self.state.messages.push(format!(
+                    "{} does not support device flow authentication.",
+                    def.display,
+                ));
+                return;
+            }
+        };
+
+        let display = def.display.to_string();
+        self.state.messages.push(format!(
+            "Authenticating with {}…",
+            display,
+        ));
+
+        // Show the inline loading line
+        let spinner = SPINNER_FRAMES[0];
+        self.state.loading_line = Some(format!(
+            "  {} Starting {} authentication…",
+            spinner, display,
+        ));
+        self.device_flow_loading = Some(FetchModelsLoading {
+            display: display.clone(),
+            tick: 0,
+        });
+
+        let tx = self.action_tx.clone();
+        let provider_clone = provider.clone();
+        // All fields of DeviceFlowConfig are &'static str, so we can just
+        // copy the reference to the static config into the spawned task.
+        let device_cfg: &'static providers::DeviceFlowConfig = device_config;
+
+        tokio::spawn(async move {
+            // Step 1: Start the device flow
+            let auth = match providers::start_device_flow(device_cfg).await {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tx.send(Action::DeviceFlowFailed(format!(
+                        "Failed to start device flow: {}", e,
+                    )));
+                    return;
+                }
+            };
+
+            // Step 2: Show the URL and code to the user via messages
+            let _ = tx.send(Action::DeviceFlowCodeReady {
+                url: auth.verification_uri.clone(),
+                code: auth.user_code.clone(),
+            });
+
+            // Step 3: Poll for the token
+            let interval = std::time::Duration::from_secs(auth.interval.max(5));
+            let max_attempts = (auth.expires_in / interval.as_secs()).max(10);
+
+            for _ in 0..max_attempts {
+                tokio::time::sleep(interval).await;
+
+                match providers::poll_device_token(device_cfg, &auth.device_code).await {
+                    Ok(Some(token)) => {
+                        let _ = tx.send(Action::DeviceFlowAuthenticated {
+                            provider: provider_clone,
+                            token,
+                        });
+                        return;
+                    }
+                    Ok(None) => {
+                        // Still pending — keep polling
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Action::DeviceFlowFailed(format!(
+                            "Authentication failed: {}", e,
+                        )));
+                        return;
+                    }
+                }
+            }
+
+            let _ = tx.send(Action::DeviceFlowFailed(
+                "Authentication timed out. Please try again with /provider.".to_string(),
+            ));
+        });
+    }
+
     /// Open the model selector dialog with the given list.
     fn open_model_selector(&mut self, provider: String, models: Vec<String>) {
         let display = providers::display_name_for_provider(&provider).to_string();

@@ -50,5 +50,13 @@ pub enum Action {
     FetchModelsFailed(String),
     /// Open the model-selection dialog with a fetched list
     ShowModelSelector { provider: String, models: Vec<String> },
+    /// Begin OAuth device flow authentication for the given provider
+    StartDeviceFlow(String),
+    /// Device flow: verification URL and user code are ready for display
+    DeviceFlowCodeReady { url: String, code: String },
+    /// Device flow authentication succeeded — store the token and proceed
+    DeviceFlowAuthenticated { provider: String, token: String },
+    /// Device flow authentication failed
+    DeviceFlowFailed(String),
     Noop,
 }
