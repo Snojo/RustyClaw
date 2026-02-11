@@ -4,22 +4,63 @@
 //! base URLs, and available models.  Used by both the onboarding wizard and
 //! the TUI `/provider` + `/model` commands.
 
+/// Authentication method for a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// API key-based authentication (Bearer token).
+    ApiKey,
+    /// OAuth 2.0 device flow authentication.
+    DeviceFlow,
+    /// No authentication required.
+    None,
+}
+
+/// Device flow configuration for OAuth providers.
+pub struct DeviceFlowConfig {
+    /// OAuth client ID for the application.
+    pub client_id: &'static str,
+    /// Device authorization endpoint URL.
+    pub device_auth_url: &'static str,
+    /// Token endpoint URL.
+    pub token_url: &'static str,
+    /// Optional scope to request.
+    pub scope: Option<&'static str>,
+}
+
 /// A provider definition with its secret key name and available models.
 pub struct ProviderDef {
     pub id: &'static str,
     pub display: &'static str,
-    /// Name of the secret that holds the API key (e.g. `"ANTHROPIC_API_KEY"`).
-    /// `None` means the provider does not require a key (e.g. Ollama).
+    /// Authentication method for this provider.
+    pub auth_method: AuthMethod,
+    /// Name of the secret that holds the API key or access token.
+    /// For API key auth: e.g. `"ANTHROPIC_API_KEY"`.
+    /// For device flow: e.g. `"GITHUB_COPILOT_TOKEN"`.
+    /// `None` means the provider does not require authentication (e.g. Ollama).
     pub secret_key: Option<&'static str>,
+    /// Device flow configuration (only used when auth_method is DeviceFlow).
+    pub device_flow: Option<&'static DeviceFlowConfig>,
     pub base_url: Option<&'static str>,
     pub models: &'static [&'static str],
 }
+
+// GitHub Copilot device flow configuration.
+// This uses the official GitHub Copilot CLI client ID which is publicly documented
+// at https://docs.github.com/en/copilot/using-github-copilot/using-github-copilot-in-the-cli
+const GITHUB_COPILOT_DEVICE_FLOW: DeviceFlowConfig = DeviceFlowConfig {
+    client_id: "Iv1.b507a08c87ecfe98",  // GitHub Copilot CLI client ID
+    device_auth_url: "https://github.com/login/device/code",
+    token_url: "https://github.com/login/oauth/access_token",
+    scope: Some("read:user"),
+};
 
 pub const PROVIDERS: &[ProviderDef] = &[
     ProviderDef {
         id: "anthropic",
         display: "Anthropic (Claude)",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("ANTHROPIC_API_KEY"),
+        device_flow: None,
         base_url: Some("https://api.anthropic.com"),
         models: &[
             "claude-opus-4-20250514",
@@ -30,7 +71,9 @@ pub const PROVIDERS: &[ProviderDef] = &[
     ProviderDef {
         id: "openai",
         display: "OpenAI (GPT / o-series)",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("OPENAI_API_KEY"),
+        device_flow: None,
         base_url: Some("https://api.openai.com/v1"),
         models: &[
             "gpt-4.1",
@@ -43,7 +86,9 @@ pub const PROVIDERS: &[ProviderDef] = &[
     ProviderDef {
         id: "google",
         display: "Google (Gemini)",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("GEMINI_API_KEY"),
+        device_flow: None,
         base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
         models: &[
             "gemini-2.5-pro",
@@ -54,14 +99,18 @@ pub const PROVIDERS: &[ProviderDef] = &[
     ProviderDef {
         id: "xai",
         display: "xAI (Grok)",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("XAI_API_KEY"),
+        device_flow: None,
         base_url: Some("https://api.x.ai/v1"),
         models: &["grok-3", "grok-3-mini"],
     },
     ProviderDef {
         id: "openrouter",
         display: "OpenRouter",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("OPENROUTER_API_KEY"),
+        device_flow: None,
         base_url: Some("https://openrouter.ai/api/v1"),
         models: &[
             "anthropic/claude-opus-4-20250514",
@@ -71,16 +120,43 @@ pub const PROVIDERS: &[ProviderDef] = &[
         ],
     },
     ProviderDef {
+        id: "github-copilot",
+        display: "GitHub Copilot",
+        auth_method: AuthMethod::DeviceFlow,
+        secret_key: Some("GITHUB_COPILOT_TOKEN"),
+        device_flow: Some(&GITHUB_COPILOT_DEVICE_FLOW),
+        base_url: Some("https://api.githubcopilot.com"),
+        models: &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o1-preview",
+            "o1-mini",
+        ],
+    },
+    ProviderDef {
+        id: "copilot-proxy",
+        display: "Copilot Proxy",
+        auth_method: AuthMethod::DeviceFlow,
+        secret_key: Some("COPILOT_PROXY_TOKEN"),
+        device_flow: Some(&GITHUB_COPILOT_DEVICE_FLOW),
+        base_url: None, // will prompt for proxy URL
+        models: &[],
+    },
+    ProviderDef {
         id: "ollama",
         display: "Ollama (local)",
+        auth_method: AuthMethod::None,
         secret_key: None,
+        device_flow: None,
         base_url: Some("http://localhost:11434/v1"),
         models: &["llama3.1", "mistral", "codellama", "deepseek-coder"],
     },
     ProviderDef {
         id: "custom",
         display: "Custom / OpenAI-compatible endpoint",
+        auth_method: AuthMethod::ApiKey,
         secret_key: Some("CUSTOM_API_KEY"),
+        device_flow: None,
         base_url: None, // will prompt
         models: &[],
     },
@@ -252,4 +328,237 @@ async fn fetch_google_models(
         .unwrap_or_default();
 
     Ok(models)
+}
+
+// ── OAuth Device Flow ───────────────────────────────────────────────────────
+
+use serde::Deserialize;
+
+/// Response from the device authorization endpoint.
+#[derive(Debug, Deserialize)]
+pub struct DeviceAuthResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+/// Response from the token endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum TokenResponse {
+    Success {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        #[serde(default)]
+        expires_in: Option<u64>,
+        token_type: String,
+    },
+    Pending {
+        error: String,
+        #[serde(default)]
+        error_description: Option<String>,
+    },
+}
+
+/// Initiate OAuth device flow and return device code and verification URL.
+pub async fn start_device_flow(
+    config: &DeviceFlowConfig,
+) -> Result<DeviceAuthResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let params = [
+        ("client_id", config.client_id),
+        ("scope", config.scope.unwrap_or("")),
+    ];
+
+    let resp = client
+        .post(config.device_auth_url)
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request device code: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("Device authorization failed: {}", e))?;
+
+    let auth_response: DeviceAuthResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse device authorization response: {}", e))?;
+
+    Ok(auth_response)
+}
+
+/// Poll the token endpoint to complete device flow authentication.
+///
+/// Returns Ok(Some(token)) when authentication succeeds,
+/// Ok(None) when still pending, and Err when authentication fails.
+pub async fn poll_device_token(
+    config: &DeviceFlowConfig,
+    device_code: &str,
+) -> Result<Option<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let params = [
+        ("client_id", config.client_id),
+        ("device_code", device_code),
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+    ];
+
+    let resp = client
+        .post(config.token_url)
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to poll token endpoint: {}", e))?;
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    // Try to parse as JSON
+    let token_response: TokenResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    match token_response {
+        TokenResponse::Success { access_token, .. } => Ok(Some(access_token)),
+        TokenResponse::Pending { error, .. } => {
+            if error == "authorization_pending" || error == "slow_down" {
+                Ok(None) // Still waiting for user authorization
+            } else {
+                Err(format!("Authentication failed: {}", error))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_by_id() {
+        let provider = provider_by_id("anthropic");
+        assert!(provider.is_some());
+        assert_eq!(provider.unwrap().display, "Anthropic (Claude)");
+
+        let provider = provider_by_id("github-copilot");
+        assert!(provider.is_some());
+        assert_eq!(provider.unwrap().display, "GitHub Copilot");
+        assert_eq!(provider.unwrap().auth_method, AuthMethod::DeviceFlow);
+
+        let provider = provider_by_id("nonexistent");
+        assert!(provider.is_none());
+    }
+
+    #[test]
+    fn test_provider_auth_methods() {
+        // API key providers
+        let anthropic = provider_by_id("anthropic").unwrap();
+        assert_eq!(anthropic.auth_method, AuthMethod::ApiKey);
+        assert!(anthropic.device_flow.is_none());
+
+        // Device flow providers
+        let copilot = provider_by_id("github-copilot").unwrap();
+        assert_eq!(copilot.auth_method, AuthMethod::DeviceFlow);
+        assert!(copilot.device_flow.is_some());
+
+        let copilot_proxy = provider_by_id("copilot-proxy").unwrap();
+        assert_eq!(copilot_proxy.auth_method, AuthMethod::DeviceFlow);
+        assert!(copilot_proxy.device_flow.is_some());
+
+        // No auth providers
+        let ollama = provider_by_id("ollama").unwrap();
+        assert_eq!(ollama.auth_method, AuthMethod::None);
+        assert!(ollama.secret_key.is_none());
+    }
+
+    #[test]
+    fn test_github_copilot_provider_config() {
+        let provider = provider_by_id("github-copilot").unwrap();
+        assert_eq!(provider.id, "github-copilot");
+        assert_eq!(provider.secret_key, Some("GITHUB_COPILOT_TOKEN"));
+        
+        let device_config = provider.device_flow.unwrap();
+        assert_eq!(device_config.device_auth_url, "https://github.com/login/device/code");
+        assert_eq!(device_config.token_url, "https://github.com/login/oauth/access_token");
+        assert!(!device_config.client_id.is_empty());
+    }
+
+    #[test]
+    fn test_copilot_proxy_provider_config() {
+        let provider = provider_by_id("copilot-proxy").unwrap();
+        assert_eq!(provider.id, "copilot-proxy");
+        assert_eq!(provider.secret_key, Some("COPILOT_PROXY_TOKEN"));
+        assert_eq!(provider.base_url, None); // Should prompt for URL
+        
+        let device_config = provider.device_flow.unwrap();
+        // Should use same device flow as github-copilot
+        assert_eq!(device_config.device_auth_url, "https://github.com/login/device/code");
+    }
+
+    #[test]
+    fn test_token_response_parsing() {
+        // Test successful token response
+        let json = r#"{"access_token":"test_token","token_type":"bearer"}"#;
+        let response: TokenResponse = serde_json::from_str(json).unwrap();
+        match response {
+            TokenResponse::Success { access_token, .. } => {
+                assert_eq!(access_token, "test_token");
+            }
+            _ => panic!("Expected Success variant"),
+        }
+
+        // Test pending response
+        let json = r#"{"error":"authorization_pending"}"#;
+        let response: TokenResponse = serde_json::from_str(json).unwrap();
+        match response {
+            TokenResponse::Pending { error, .. } => {
+                assert_eq!(error, "authorization_pending");
+            }
+            _ => panic!("Expected Pending variant"),
+        }
+    }
+
+    #[test]
+    fn test_all_providers_have_valid_config() {
+        for provider in PROVIDERS {
+            // Verify basic fields are set
+            assert!(!provider.id.is_empty());
+            assert!(!provider.display.is_empty());
+
+            // Verify auth consistency
+            match provider.auth_method {
+                AuthMethod::ApiKey => {
+                    assert!(provider.secret_key.is_some(), 
+                        "Provider {} with ApiKey auth must have secret_key", provider.id);
+                    assert!(provider.device_flow.is_none(),
+                        "Provider {} with ApiKey auth should not have device_flow", provider.id);
+                }
+                AuthMethod::DeviceFlow => {
+                    assert!(provider.secret_key.is_some(),
+                        "Provider {} with DeviceFlow auth must have secret_key", provider.id);
+                    assert!(provider.device_flow.is_some(),
+                        "Provider {} with DeviceFlow auth must have device_flow config", provider.id);
+                }
+                AuthMethod::None => {
+                    assert!(provider.secret_key.is_none(),
+                        "Provider {} with None auth should not have secret_key", provider.id);
+                    assert!(provider.device_flow.is_none(),
+                        "Provider {} with None auth should not have device_flow", provider.id);
+                }
+            }
+        }
+    }
 }

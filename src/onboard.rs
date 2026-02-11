@@ -97,42 +97,81 @@ pub fn run_onboard_wizard(
         println!();
     }
 
-    // ── 2. API key ─────────────────────────────────────────────────
+    // ── 2. Authentication ──────────────────────────────────────────
+    use crate::providers::AuthMethod;
+
     if let Some(secret_key) = provider.secret_key {
-        // Check if we already have one stored.
-        let existing = secrets.get_secret(secret_key, true)?;
-        if let Some(_) = &existing {
-            let reuse = prompt_line(
-                &mut reader,
-                &format!("{} ", t::accent(&format!("An API key for {} is already stored. Keep it? [Y/n]:", provider.display))),
-            )?;
-            if reuse.trim().eq_ignore_ascii_case("n") {
-                let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
-                if key.trim().is_empty() {
-                    println!("  {}", t::icon_warn("No key entered — keeping existing key."));
+        match provider.auth_method {
+            AuthMethod::ApiKey => {
+                // Standard API key authentication
+                let existing = secrets.get_secret(secret_key, true)?;
+                if let Some(_) = &existing {
+                    let reuse = prompt_line(
+                        &mut reader,
+                        &format!("{} ", t::accent(&format!("An API key for {} is already stored. Keep it? [Y/n]:", provider.display))),
+                    )?;
+                    if reuse.trim().eq_ignore_ascii_case("n") {
+                        let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
+                        if key.trim().is_empty() {
+                            println!("  {}", t::icon_warn("No key entered — keeping existing key."));
+                        } else {
+                            secrets.store_secret(secret_key, key.trim())?;
+                            println!("  {}", t::icon_ok("API key updated."));
+                        }
+                    } else {
+                        println!("  {}", t::icon_ok("Keeping existing API key."));
+                    }
                 } else {
-                    secrets.store_secret(secret_key, key.trim())?;
-                    println!("  {}", t::icon_ok("API key updated."));
+                    let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
+                    if key.trim().is_empty() {
+                        println!("  {}", t::icon_warn("No key entered — you can add one later with:"));
+                        println!("      {}", t::accent_bright("rustyclaw onboard"));
+                    } else {
+                        secrets.store_secret(secret_key, key.trim())?;
+                        println!("  {}", t::icon_ok("API key stored securely."));
+                    }
                 }
-            } else {
-                println!("  {}", t::icon_ok("Keeping existing API key."));
             }
-        } else {
-            let key = prompt_secret(&mut reader, &format!("{} ", t::accent("Enter API key:")))?;
-            if key.trim().is_empty() {
-                println!("  {}", t::icon_warn("No key entered — you can add one later with:"));
-                println!("      {}", t::accent_bright("rustyclaw onboard"));
-            } else {
-                secrets.store_secret(secret_key, key.trim())?;
-                println!("  {}", t::icon_ok("API key stored securely."));
+            AuthMethod::DeviceFlow => {
+                // OAuth device flow authentication
+                if let Some(device_config) = provider.device_flow {
+                    let existing = secrets.get_secret(secret_key, true)?;
+                    if let Some(_) = &existing {
+                        let reuse = prompt_line(
+                            &mut reader,
+                            &format!("{} ", t::accent(&format!("An access token for {} is already stored. Keep it? [Y/n]:", provider.display))),
+                        )?;
+                        if !reuse.trim().eq_ignore_ascii_case("n") {
+                            println!("  {}", t::icon_ok("Keeping existing access token."));
+                            println!();
+                            // Continue to model selection
+                        } else {
+                            // Re-authenticate with device flow
+                            perform_device_flow_auth(&mut reader, provider.display, device_config, secret_key, secrets)?;
+                        }
+                    } else {
+                        // New authentication
+                        perform_device_flow_auth(&mut reader, provider.display, device_config, secret_key, secrets)?;
+                    }
+                } else {
+                    println!("  {}", t::icon_warn("Device flow configuration missing."));
+                }
+            }
+            AuthMethod::None => {
+                // No authentication needed
             }
         }
         println!();
     }
 
-    // ── 3. Base URL (only for custom) ──────────────────────────────
-    let base_url: String = if provider.id == "custom" {
-        let url = prompt_line(&mut reader, &format!("{} ", t::accent("Base URL (OpenAI-compatible):")))?;
+    // ── 3. Base URL (only for custom or copilot-proxy) ────────────
+    let base_url: String = if provider.id == "custom" || provider.id == "copilot-proxy" {
+        let prompt_text = if provider.id == "copilot-proxy" {
+            "Copilot Proxy URL:"
+        } else {
+            "Base URL (OpenAI-compatible):"
+        };
+        let url = prompt_line(&mut reader, &format!("{} ", t::accent(prompt_text)))?;
         let url = url.trim().to_string();
         if url.is_empty() {
             println!("  {}", t::icon_warn("No URL entered. You can set model.base_url in config.toml later."));
@@ -244,6 +283,80 @@ pub fn run_onboard_wizard(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Perform OAuth device flow authentication and store the token.
+fn perform_device_flow_auth(
+    reader: &mut impl BufRead,
+    provider_name: &str,
+    device_config: &crate::providers::DeviceFlowConfig,
+    secret_key: &str,
+    secrets: &mut SecretsManager,
+) -> Result<()> {
+    println!("{}", t::heading(&format!("Authenticating with {}...", provider_name)));
+    println!();
+
+    // Start the device flow
+    let runtime = tokio::runtime::Runtime::new()?;
+    let auth_response = runtime.block_on(async {
+        crate::providers::start_device_flow(device_config).await
+    }).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Display the verification URL and code to the user
+    println!("  {}", t::bold("Please complete the following steps:"));
+    println!();
+    println!("  1. Visit: {}", t::accent_bright(&auth_response.verification_uri));
+    println!("  2. Enter code: {}", t::accent_bright(&auth_response.user_code));
+    println!();
+    println!("  {}", t::muted(&format!("Code expires in {} seconds", auth_response.expires_in)));
+    println!();
+
+    // Wait for user to press Enter
+    println!("{}", t::accent("Press Enter after completing authorization..."));
+    prompt_line(reader, "")?;
+
+    // Poll for the token
+    println!("  {}", t::muted("Waiting for authorization..."));
+    
+    // Use the server-provided interval, which is typically 5 seconds for GitHub.
+    // This respects GitHub's rate limiting and follows OAuth 2.0 device flow best practices.
+    let interval = std::time::Duration::from_secs(auth_response.interval);
+    
+    // Calculate max attempts based on expiration time and interval
+    let max_attempts = (auth_response.expires_in / auth_response.interval).max(10);
+    
+    let mut token: Option<String> = None;
+    for _attempt in 0..max_attempts {
+        match runtime.block_on(async {
+            crate::providers::poll_device_token(device_config, &auth_response.device_code).await
+        }) {
+            Ok(Some(access_token)) => {
+                token = Some(access_token);
+                break;
+            }
+            Ok(None) => {
+                // Still pending, wait and retry
+                print!(".");
+                io::stdout().flush()?;
+                std::thread::sleep(interval);
+            }
+            Err(e) => {
+                println!();
+                println!("  {}", t::icon_warn(&format!("Authentication failed: {}", e)));
+                return Ok(());
+            }
+        }
+    }
+    println!();
+
+    if let Some(access_token) = token {
+        secrets.store_secret(secret_key, &access_token)?;
+        println!("  {}", t::icon_ok("Authentication successful! Token stored securely."));
+    } else {
+        println!("  {}", t::icon_warn("Authentication timed out. Please try again."));
+    }
+
+    Ok(())
+}
 
 fn prompt_line(reader: &mut impl BufRead, prompt: &str) -> Result<String> {
     print!("{}", prompt);
