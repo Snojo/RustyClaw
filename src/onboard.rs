@@ -317,8 +317,12 @@ fn perform_device_flow_auth(
     // Poll for the token
     println!("  {}", t::muted("Waiting for authorization..."));
     
-    let interval = std::time::Duration::from_secs(auth_response.interval.max(5));
-    let max_attempts = (auth_response.expires_in / interval.as_secs()).max(10);
+    // Use the server-provided interval, which is typically 5 seconds for GitHub.
+    // This respects GitHub's rate limiting and follows OAuth 2.0 device flow best practices.
+    let interval = std::time::Duration::from_secs(auth_response.interval);
+    
+    // Calculate max attempts based on expiration time and interval
+    let max_attempts = (auth_response.expires_in / auth_response.interval).max(10);
     
     let mut token: Option<String> = None;
     for _attempt in 0..max_attempts {

@@ -44,7 +44,9 @@ pub struct ProviderDef {
     pub models: &'static [&'static str],
 }
 
-// GitHub Copilot device flow configuration
+// GitHub Copilot device flow configuration.
+// This uses the official GitHub Copilot CLI client ID which is publicly documented
+// at https://docs.github.com/en/copilot/using-github-copilot/using-github-copilot-in-the-cli
 const GITHUB_COPILOT_DEVICE_FLOW: DeviceFlowConfig = DeviceFlowConfig {
     client_id: "Iv1.b507a08c87ecfe98",  // GitHub Copilot CLI client ID
     device_auth_url: "https://github.com/login/device/code",
@@ -491,7 +493,7 @@ mod tests {
         let device_config = provider.device_flow.unwrap();
         assert_eq!(device_config.device_auth_url, "https://github.com/login/device/code");
         assert_eq!(device_config.token_url, "https://github.com/login/oauth/access_token");
-        assert!(device_config.client_id.len() > 0);
+        assert!(!device_config.client_id.is_empty());
     }
 
     #[test]
