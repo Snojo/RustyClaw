@@ -884,12 +884,12 @@ fn setup_agent_ssh_key(
     println!("  performed by the agent.");
     println!();
 
-    let gen = prompt_line(
+    let do_gen = prompt_line(
         reader,
         &format!("{} ", t::accent("Generate an agent SSH key? [y/N]:")),
     )?;
 
-    if gen.trim().eq_ignore_ascii_case("y") {
+    if do_gen.trim().eq_ignore_ascii_case("y") {
         let comment = format!("rustyclaw-agent@{}", whoami());
         let pubkey = secrets.generate_ssh_key(
             "rustyclaw_agent",

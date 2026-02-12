@@ -420,10 +420,10 @@ impl FooterPane {
 
         // Show cursor when in input mode
         if state.input_mode == InputMode::Input {
-            frame.set_cursor(
+            frame.set_cursor_position((
                 area.x + prefix_width + self.input.visual_cursor().saturating_sub(scroll) as u16,
                 area.y,
-            );
+            ));
         }
     }
 }

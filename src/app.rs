@@ -229,7 +229,7 @@ pub struct App {
     /// Policy-picker dialog state
     policy_picker: Option<PolicyPickerState>,
     /// Hatching page (shown on first run)
-    hatching_page: Option<Box<dyn Page>>,
+    hatching_page: Option<Hatching>,
     /// Whether we're currently showing the hatching animation
     showing_hatching: bool,
 }
@@ -291,7 +291,8 @@ impl App {
 
         // Create hatching page if needed
         let (hatching_page, showing_hatching) = if needs_hatching {
-            (Some(Box::new(Hatching::new()?) as Box<dyn Page>), true)
+            let agent_name = config.agent_name.clone();
+            (Some(Hatching::new(&agent_name)?), true)
         } else {
             (None, false)
         };
@@ -554,7 +555,7 @@ impl App {
                 self.should_suspend = false;
                 return Ok(None);
             }
-            Action::InputSubmit(ref text) => {
+            Action::InputSubmit(text) => {
                 return self.handle_input_submit(text.clone());
             }
             Action::ReconnectGateway => {
@@ -569,11 +570,11 @@ impl App {
                 self.restart_gateway().await;
                 return Ok(Some(Action::Update));
             }
-            Action::SendToGateway(ref text) => {
+            Action::SendToGateway(text) => {
                 self.send_to_gateway(text.clone()).await;
                 return Ok(None);
             }
-            Action::GatewayMessage(ref text) => {
+            Action::GatewayMessage(text) => {
                 // Parse the gateway JSON envelope and extract the payload.
                 // The gateway wraps responses as {"type":"response","received":"…"}.
                 let payload = serde_json::from_str::<serde_json::Value>(text)
@@ -604,7 +605,7 @@ impl App {
                 // Auto-scroll
                 return Ok(Some(Action::Update));
             }
-            Action::GatewayDisconnected(ref reason) => {
+            Action::GatewayDisconnected(reason) => {
                 self.state.gateway_status = GatewayStatus::Disconnected;
                 self.state.messages.push(format!("Gateway disconnected: {}", reason));
                 self.ws_sink = None;
@@ -649,7 +650,7 @@ impl App {
                 self.open_provider_selector();
                 return Ok(None);
             }
-            Action::SetProvider(ref provider) => {
+            Action::SetProvider(provider) => {
                 let provider = provider.clone();
                 // Save provider to config
                 let model_cfg = self.state.config.model.get_or_insert_with(|| {
@@ -716,33 +717,33 @@ impl App {
                 }
                 return Ok(None);
             }
-            Action::PromptApiKey(ref provider) => {
+            Action::PromptApiKey(provider) => {
                 return Ok(self.open_api_key_dialog(provider.clone()));
             }
-            Action::ConfirmStoreSecret { ref provider, ref key } => {
+            Action::ConfirmStoreSecret { provider, key } => {
                 return self.handle_confirm_store_secret(provider.clone(), key.clone());
             }
-            Action::FetchModels(ref provider) => {
+            Action::FetchModels(provider) => {
                 self.spawn_fetch_models(provider.clone());
                 return Ok(None);
             }
-            Action::FetchModelsFailed(ref msg) => {
+            Action::FetchModelsFailed(msg) => {
                 self.fetch_loading = None;
                 self.state.loading_line = None;
                 self.state.messages.push(msg.clone());
                 return Ok(Some(Action::Update));
             }
-            Action::ShowModelSelector { ref provider, ref models } => {
+            Action::ShowModelSelector { provider, models } => {
                 self.fetch_loading = None;
                 self.state.loading_line = None;
                 self.open_model_selector(provider.clone(), models.clone());
                 return Ok(None);
             }
-            Action::StartDeviceFlow(ref provider) => {
+            Action::StartDeviceFlow(provider) => {
                 self.spawn_device_flow(provider.clone());
                 return Ok(None);
             }
-            Action::DeviceFlowCodeReady { ref url, ref code } => {
+            Action::DeviceFlowCodeReady { url, code } => {
                 self.state.messages.push(format!(
                     "Open this URL in your browser:",
                 ));
@@ -754,7 +755,7 @@ impl App {
                 ));
                 return Ok(Some(Action::Update));
             }
-            Action::DeviceFlowAuthenticated { ref provider, ref token } => {
+            Action::DeviceFlowAuthenticated { provider, token } => {
                 self.device_flow_loading = None;
                 self.state.loading_line = None;
                 let secret_key = providers::secret_key_for_provider(provider)
@@ -777,13 +778,13 @@ impl App {
                 // Proceed to model selection
                 return Ok(Some(Action::FetchModels(provider.clone())));
             }
-            Action::DeviceFlowFailed(ref msg) => {
+            Action::DeviceFlowFailed(msg) => {
                 self.device_flow_loading = None;
                 self.state.loading_line = None;
                 self.state.messages.push(msg.clone());
                 return Ok(Some(Action::Update));
             }
-            Action::ShowCredentialDialog { ref name, ref disabled, .. } => {
+            Action::ShowCredentialDialog { name, disabled, .. } => {
                 let has_totp = self.state.secrets_manager.has_totp();
                 // Look up the actual current policy from the vault metadata
                 let current_policy = self.state.secrets_manager
@@ -830,18 +831,18 @@ impl App {
                 self.hatching_page = None;
                 return Ok(None);
             }
-            Action::BeginHatchingExchange => {
-                // Send the hatching prompt to the gateway to start the identity exchange
-                let prompt = Hatching::hatching_prompt();
-                self.send_to_gateway(prompt).await;
+            Action::BeginHatchingExchange | Action::HatchingSendMessage(_) => {
+                // Build a structured chat request with full conversation history
+                // and send it to the gateway for model completion.
+                let messages = self.hatching_page.as_ref()
+                    .map(|h| h.chat_messages());
+                if let Some(msgs) = messages {
+                    let chat_json = self.build_hatching_chat_request(msgs);
+                    self.send_to_gateway(chat_json).await;
+                }
                 return Ok(Some(Action::Update));
             }
-            Action::HatchingSendMessage(ref text) => {
-                // Forward user message to gateway during hatching exchange
-                self.send_to_gateway(text.clone()).await;
-                return Ok(Some(Action::Update));
-            }
-            Action::FinishHatching(ref soul_content) => {
+            Action::FinishHatching(soul_content) => {
                 // Save the generated identity as SOUL.md
                 let content = soul_content.clone();
                 if let Err(e) = self.state.soul_manager.set_content(content) {
@@ -1074,7 +1075,7 @@ impl App {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(Message::Text(text)) => {
-                    let _ = tx.send(Action::GatewayMessage(text));
+                    let _ = tx.send(Action::GatewayMessage(text.to_string()));
                 }
                 Ok(Message::Close(_)) => {
                     let _ = tx.send(Action::GatewayDisconnected(
@@ -1094,10 +1095,55 @@ impl App {
         }
     }
 
+    /// Build a structured JSON chat request for the hatching exchange.
+    ///
+    /// The request includes the full conversation history (system prompt +
+    /// all user/assistant turns), the configured model/provider/base_url,
+    /// and the API key from the secrets vault so the gateway can call the
+    /// model provider.
+    fn build_hatching_chat_request(
+        &mut self,
+        messages: Vec<crate::gateway::ChatMessage>,
+    ) -> String {
+
+        let (provider, model, base_url) = match self.state.config.model {
+            Some(ref m) => (
+                m.provider.clone(),
+                m.model.clone().unwrap_or_default(),
+                m.base_url.clone().unwrap_or_else(|| {
+                    crate::providers::base_url_for_provider(&m.provider)
+                        .unwrap_or("")
+                        .to_string()
+                }),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+
+        // Fetch the API key from the vault (if the provider needs one).
+        let api_key = crate::providers::secret_key_for_provider(&provider)
+            .and_then(|key_name| {
+                self.state
+                    .secrets_manager
+                    .get_secret(key_name, true)
+                    .ok()
+                    .flatten()
+            });
+
+        serde_json::json!({
+            "type": "chat",
+            "messages": messages,
+            "model": model,
+            "provider": provider,
+            "base_url": base_url,
+            "api_key": api_key,
+        })
+        .to_string()
+    }
+
     /// Send a text message to the gateway over the open WebSocket connection.
     async fn send_to_gateway(&mut self, text: String) {
         if let Some(ref mut sink) = self.ws_sink {
-            match sink.send(Message::Text(text)).await {
+            match sink.send(Message::Text(text.into())).await {
                 Ok(()) => {}
                 Err(err) => {
                     self.state.messages.push(format!("Send failed: {}", err));
@@ -1172,7 +1218,7 @@ impl App {
 
     fn draw(&mut self, tui: &mut Tui) -> Result<()> {
         tui.draw(|frame| {
-            let area = frame.size();
+            let area = frame.area();
 
             let ps = PaneState {
                 config: &self.state.config,
@@ -1506,10 +1552,10 @@ impl App {
                     frame.render_widget(Paragraph::new(prompt), input_area);
 
                     // Show cursor
-                    frame.set_cursor(
+                    frame.set_cursor_position((
                         input_area.x + 2 + masked.len() as u16,
                         input_area.y,
-                    );
+                    ));
                 }
             }
             ApiKeyDialogPhase::ConfirmStore => {

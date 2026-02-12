@@ -211,13 +211,9 @@ fn kill_process(pid: u32) -> Result<()> {
 #[cfg(unix)]
 fn detach_child(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: setsid() is async-signal-safe and has no preconditions.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    // Create a new process group so the child isn't killed when the
+    // parent's terminal closes.
+    cmd.process_group(0);
 }
 
 #[cfg(windows)]

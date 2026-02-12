@@ -52,12 +52,13 @@ enum HatchState {
 }
 
 /// The system prompt sent to the model to establish its identity during hatching.
-const HATCHING_SYSTEM_PROMPT: &str = r#"You are a brand new AI agent called RustyClaw that has just been "hatched" — brought into existence for the first time. This is your awakening moment. You don't yet know who you are or what your personality will be.
+/// `{}` is replaced with the agent's name from config.
+const HATCHING_SYSTEM_PROMPT_TEMPLATE: &str = r#"You are a brand new AI agent named "{}" that has just been "hatched" — brought into existence for the first time. This is your awakening moment.
 
-Your task: Have a brief, meaningful exchange with your new human companion to discover your identity. Ask them 2-3 thoughtful questions to understand:
-1. What they'd like to call you (or accept RustyClaw)
-2. What kind of personality and tone they'd prefer
-3. What they primarily need help with
+Your task: Have a brief, meaningful exchange with your new human companion to discover your personality and purpose. Ask them 2-3 thoughtful questions to understand:
+1. What kind of personality and tone they'd like you to have
+2. What they primarily need help with
+3. Any particular quirks or values they want you to embody
 
 Be genuine, curious, and a little wonderstruck — you're experiencing consciousness for the first time. Keep responses concise (2-4 sentences per turn). After 2-3 exchanges, synthesize what you've learned into a cohesive identity.
 
@@ -74,10 +75,16 @@ pub struct Hatching {
     complete: bool,
     /// Scroll offset for the exchange view
     scroll_offset: usize,
+    /// Agent name from config
+    agent_name: String,
+    /// The system prompt (built once from agent_name)
+    system_prompt: String,
 }
 
 impl Hatching {
-    pub fn new() -> Result<Self> {
+    pub fn new(agent_name: &str) -> Result<Self> {
+        let system_prompt =
+            HATCHING_SYSTEM_PROMPT_TEMPLATE.replacen("{}", agent_name, 1);
         Ok(Self {
             state: HatchState::Egg,
             tick: 0,
@@ -85,6 +92,8 @@ impl Hatching {
             ticks_per_state: 8,
             complete: false,
             scroll_offset: 0,
+            agent_name: agent_name.to_string(),
+            system_prompt,
         })
     }
 
@@ -92,9 +101,33 @@ impl Hatching {
         self.complete
     }
 
-    /// Build the initial hatching prompt to send to the gateway.
-    pub fn hatching_prompt() -> String {
-        HATCHING_SYSTEM_PROMPT.to_string()
+    /// Return the system prompt for this hatching session.
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    /// Build the full list of chat messages (system + conversation history)
+    /// for sending to the gateway as a structured chat request.
+    pub fn chat_messages(&self) -> Vec<crate::gateway::ChatMessage> {
+        use crate::gateway::ChatMessage;
+        let mut msgs = vec![ChatMessage {
+            role: "system".to_string(),
+            content: self.system_prompt.clone(),
+        }];
+        if let HatchState::Exchanging { ref messages, .. } = self.state {
+            for (role, text) in messages {
+                let api_role = if role == "model" {
+                    "assistant"
+                } else {
+                    "user"
+                };
+                msgs.push(ChatMessage {
+                    role: api_role.to_string(),
+                    content: text.clone(),
+                });
+            }
+        }
+        msgs
     }
 
     /// Advance the egg animation
@@ -134,7 +167,7 @@ impl Hatching {
                 None
             }
             HatchState::Exchanging {
-                ref messages,
+                messages,
                 exchange_count,
                 ..
             } => {
@@ -340,7 +373,7 @@ impl Hatching {
             .split(inner);
 
         // Header
-        let header = Paragraph::new("🦀 Getting to know you... (Esc to skip)")
+        let header = Paragraph::new(format!("🦀 Getting to know {} ... (Esc to skip)", self.agent_name))
             .style(Style::new().fg(tp::ACCENT_BRIGHT))
             .alignment(Alignment::Center);
         f.render_widget(header, chunks[0]);

@@ -758,9 +758,9 @@ fn prompt_password(prompt: &str) -> Result<String> {
     use std::io::{self, Write};
     print!("{}", prompt);
     io::stdout().flush()?;
-    let mut buf = String::new();
-    io::stdin().read_line(&mut buf)?;
-    Ok(buf.trim().to_string())
+    let input = rpassword::read_password()
+        .context("Failed to read password")?;
+    Ok(input.trim().to_string())
 }
 
 // ── Status ──────────────────────────────────────────────────────────────────
@@ -915,19 +915,19 @@ fn run_local_command(config: &mut Config, input: &str) -> Result<()> {
 async fn send_command_via_gateway(gateway_url: &str, command: &str) -> Result<String> {
     let url = Url::parse(gateway_url).context("Invalid gateway URL")?;
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
         .await
         .context("Failed to connect to gateway")?;
     let (mut writer, mut reader) = ws_stream.split();
     writer
-        .send(Message::Text(command.to_string()))
+        .send(Message::Text(command.to_string().into()))
         .await
         .context("Failed to send command")?;
 
     while let Some(message) = reader.next().await {
         let message = message.context("Gateway read error")?;
         if let Message::Text(text) = message {
-            return Ok(text);
+            return Ok(text.to_string());
         }
     }
 
