@@ -7,6 +7,36 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Resolve a path argument against the workspace root.
+/// Absolute paths are used as-is; relative paths are joined to `workspace_dir`.
+fn resolve_path(workspace_dir: &Path, path: &str) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        workspace_dir.join(p)
+    }
+}
+
+/// Filter for `walkdir` — skip common non-content directories.
+fn should_visit(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    if entry.file_type().is_dir() {
+        !matches!(
+            name.as_ref(),
+            ".git" | "node_modules" | "target" | ".hg" | ".svn"
+                | "__pycache__" | "dist" | "build"
+        )
+    } else {
+        true
+    }
+}
 
 // ── Tool definitions ────────────────────────────────────────────────────────
 
@@ -28,14 +58,22 @@ pub struct ToolDef {
     pub description: &'static str,
     pub parameters: Vec<ToolParam>,
     /// The function that executes the tool, returning a string result or error.
-    pub execute: fn(args: &Value) -> Result<String, String>,
+    pub execute: fn(args: &Value, workspace_dir: &Path) -> Result<String, String>,
 }
 
 // ── Tool registry ───────────────────────────────────────────────────────────
 
 /// Return all available tools.
 pub fn all_tools() -> Vec<&'static ToolDef> {
-    vec![&READ_FILE]
+    vec![
+        &READ_FILE,
+        &WRITE_FILE,
+        &EDIT_FILE,
+        &LIST_DIRECTORY,
+        &SEARCH_FILES,
+        &FIND_FILES,
+        &EXECUTE_COMMAND,
+    ]
 }
 
 // ── Built-in tools ──────────────────────────────────────────────────────────
@@ -50,13 +88,79 @@ pub static READ_FILE: ToolDef = ToolDef {
     execute: exec_read_file,
 };
 
+pub static WRITE_FILE: ToolDef = ToolDef {
+    name: "write_file",
+    description: "Create or overwrite a file with the given content. \
+                  Parent directories are created automatically.",
+    parameters: vec![],
+    execute: exec_write_file,
+};
+
+pub static EDIT_FILE: ToolDef = ToolDef {
+    name: "edit_file",
+    description: "Make a targeted edit to an existing file using search-and-replace. \
+                  The old_string must match exactly one location in the file. \
+                  Include enough context lines to make the match unique.",
+    parameters: vec![],
+    execute: exec_edit_file,
+};
+
+pub static LIST_DIRECTORY: ToolDef = ToolDef {
+    name: "list_directory",
+    description: "List the contents of a directory. Returns file and \
+                  directory names, with directories suffixed by '/'.",
+    parameters: vec![],
+    execute: exec_list_directory,
+};
+
+pub static SEARCH_FILES: ToolDef = ToolDef {
+    name: "search_files",
+    description: "Search file CONTENTS for a text pattern (like grep -i). \
+                  The search is case-insensitive. Returns matching lines \
+                  with paths and line numbers. Use `find_files` instead \
+                  when searching by file name. Set `path` to an absolute \
+                  directory (e.g. '/Users/alice') to search outside the \
+                  workspace.",
+    parameters: vec![],
+    execute: exec_search_files,
+};
+
+pub static FIND_FILES: ToolDef = ToolDef {
+    name: "find_files",
+    description: "Find files by name. Accepts plain keywords (case-insensitive \
+                  substring match) OR glob patterns (e.g. '*.pdf'). Multiple \
+                  keywords can be separated with spaces — a file matches if its \
+                  name contains ANY keyword. Examples: 'resume', 'resume cv', \
+                  '*.pdf'. Set `path` to an absolute directory to search outside \
+                  the workspace (e.g. '/Users/alice'). Use `search_files` to \
+                  search file CONTENTS instead.",
+    parameters: vec![],
+    execute: exec_find_files,
+};
+
+pub static EXECUTE_COMMAND: ToolDef = ToolDef {
+    name: "execute_command",
+    description: "Execute a shell command and return its output (stdout + stderr). \
+                  Runs via `sh -c` in the workspace directory by default. \
+                  Use for builds, tests, git operations, system lookups \
+                  (e.g. `find ~ -name '*.pdf'`, `mdfind`, `which`), or \
+                  any other CLI task. Set `working_dir` to an absolute \
+                  path to run in a different directory.",
+    parameters: vec![],
+    execute: exec_execute_command,
+};
+
 /// We need a runtime-constructed param list because `Vec` isn't const.
 /// This function is what the registry / formatters actually call.
 pub fn read_file_params() -> Vec<ToolParam> {
     vec![
         ToolParam {
             name: "path".into(),
-            description: "Absolute or relative path to the file to read.".into(),
+            description: "Path to the file to read. Relative paths resolve \
+                          against the workspace root; use an absolute path \
+                          (e.g. '/Users/alice/notes.txt') to read files \
+                          outside the workspace."
+                .into(),
             param_type: "string".into(),
             required: true,
         },
@@ -75,14 +179,144 @@ pub fn read_file_params() -> Vec<ToolParam> {
     ]
 }
 
-fn exec_read_file(args: &Value) -> Result<String, String> {
-    let path = args
+fn write_file_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "path".into(),
+            description: "Path to the file to create or overwrite.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "content".into(),
+            description: "The full content to write to the file.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+    ]
+}
+
+fn edit_file_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "path".into(),
+            description: "Path to the file to edit.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "old_string".into(),
+            description: "The exact text to find (must match exactly once). \
+                          Include surrounding context lines for uniqueness."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "new_string".into(),
+            description: "The replacement text.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+    ]
+}
+
+fn list_directory_params() -> Vec<ToolParam> {
+    vec![ToolParam {
+        name: "path".into(),
+        description: "Path to the directory to list.".into(),
+        param_type: "string".into(),
+        required: true,
+    }]
+}
+
+fn search_files_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "pattern".into(),
+            description: "The text pattern to search for inside files.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "path".into(),
+            description: "Directory to search in. Defaults to the workspace root. \
+                          Use an absolute path (e.g. '/Users/alice/Documents') to \
+                          search outside the workspace."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "include".into(),
+            description: "Glob pattern to filter filenames (e.g. '*.rs').".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn find_files_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "pattern".into(),
+            description: "Search term(s) or glob pattern. Plain words are matched \
+                          case-insensitively against file names (e.g. 'resume' \
+                          matches Resume.pdf). Separate multiple keywords with \
+                          spaces to match ANY (e.g. 'resume cv'). Use glob \
+                          syntax ('*', '?') for extension filters (e.g. '*.pdf')."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "path".into(),
+            description: "Base directory for the search. Defaults to the workspace root. \
+                          Use an absolute path (e.g. '/Users/alice' or '~') to \
+                          search outside the workspace."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn execute_command_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "command".into(),
+            description: "The shell command to execute (passed to sh -c).".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "working_dir".into(),
+            description: "Working directory for the command. Defaults to the workspace root. \
+                          Use an absolute path to run elsewhere."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "timeout_secs".into(),
+            description: "Maximum seconds before killing the command (default: 30).".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+    ]
+}
+
+// ── Tool implementations ──────────────────────────────────────────────────────
+
+fn exec_read_file(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let path_str = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing required parameter: path".to_string())?;
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+    let path = resolve_path(workspace_dir, path_str);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
 
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
@@ -118,6 +352,393 @@ fn exec_read_file(args: &Value) -> Result<String, String> {
     Ok(numbered.join("\n"))
 }
 
+fn exec_write_file(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let path_str = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: path".to_string())?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: content".to_string())?;
+
+    let path = resolve_path(workspace_dir, path_str);
+
+    // Always create parent directories.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directories for '{}': {}", path.display(), e))?;
+    }
+
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))?;
+
+    Ok(format!(
+        "Successfully wrote {} bytes to {}",
+        content.len(),
+        path.display()
+    ))
+}
+
+fn exec_edit_file(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let path_str = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: path".to_string())?;
+    let old_string = args
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: old_string".to_string())?;
+    let new_string = args
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: new_string".to_string())?;
+
+    let path = resolve_path(workspace_dir, path_str);
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+
+    let count = content.matches(old_string).count();
+    if count == 0 {
+        return Err(format!(
+            "old_string not found in {}",
+            path.display()
+        ));
+    }
+    if count > 1 {
+        return Err(format!(
+            "old_string found {} times in {} — must match exactly once. \
+             Add more surrounding context to make the match unique.",
+            count,
+            path.display()
+        ));
+    }
+
+    let new_content = content.replacen(old_string, new_string, 1);
+    std::fs::write(&path, &new_content)
+        .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))?;
+
+    Ok(format!("Successfully edited {}", path.display()))
+}
+
+fn exec_list_directory(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let path_str = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: path".to_string())?;
+
+    let path = resolve_path(workspace_dir, path_str);
+
+    let entries = std::fs::read_dir(&path)
+        .map_err(|e| format!("Failed to read directory '{}': {}", path.display(), e))?;
+
+    let mut items: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Error reading entry: {}", e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("Error reading file type: {}", e))?;
+        if ft.is_dir() {
+            items.push(format!("{}/", name));
+        } else if ft.is_symlink() {
+            items.push(format!("{}@", name));
+        } else {
+            items.push(name);
+        }
+    }
+
+    items.sort();
+    Ok(items.join("\n"))
+}
+
+fn exec_search_files(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: pattern".to_string())?;
+    let search_path = args.get("path").and_then(|v| v.as_str());
+    let include = args.get("include").and_then(|v| v.as_str());
+
+    let base = match search_path {
+        Some(p) => resolve_path(workspace_dir, p),
+        None => workspace_dir.to_path_buf(),
+    };
+
+    let include_glob = match include {
+        Some(pat) => Some(
+            glob::Pattern::new(pat)
+                .map_err(|e| format!("Invalid include glob '{}': {}", pat, e))?,
+        ),
+        None => None,
+    };
+
+    // Case-insensitive content search.
+    let pattern_lower = pattern.to_lowercase();
+
+    let mut results = Vec::new();
+    let max_results: usize = 100;
+
+    for entry in walkdir::WalkDir::new(&base)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(should_visit)
+    {
+        if results.len() >= max_results {
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        // Apply include filter.
+        if let Some(ref glob_pat) = include_glob {
+            if !glob_pat.matches(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+        }
+
+        // Read and search (case-insensitive).
+        let content = match std::fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue, // skip binary / unreadable files
+        };
+
+        for (line_num, line) in content.lines().enumerate() {
+            if results.len() >= max_results {
+                break;
+            }
+            if line.to_lowercase().contains(&pattern_lower) {
+                let rel = entry
+                    .path()
+                    .strip_prefix(&base)
+                    .unwrap_or(entry.path());
+                results.push(format!(
+                    "{}:{}: {}",
+                    rel.display(),
+                    line_num + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        Ok("No matches found.".to_string())
+    } else {
+        let count = results.len();
+        let mut output = results.join("\n");
+        if count >= max_results {
+            output.push_str(&format!(
+                "\n\n(Results truncated at {} matches)",
+                max_results
+            ));
+        }
+        Ok(output)
+    }
+}
+
+/// Returns `true` if the pattern string contains glob special characters.
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+fn exec_find_files(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: pattern".to_string())?;
+    let search_path = args.get("path").and_then(|v| v.as_str());
+
+    let base = match search_path {
+        Some(p) => {
+            let expanded = if p.starts_with('~') {
+                dirs::home_dir()
+                    .map(|h| h.join(p.strip_prefix("~/").unwrap_or(&p[1..])))
+                    .unwrap_or_else(|| PathBuf::from(p))
+            } else {
+                resolve_path(workspace_dir, p)
+            };
+            expanded
+        }
+        None => workspace_dir.to_path_buf(),
+    };
+
+    let max_results: usize = 200;
+
+    if is_glob_pattern(pattern) {
+        // ── Glob mode ───────────────────────────────────────────────
+        let effective = if pattern.contains('/') || pattern.starts_with("**") {
+            pattern.to_string()
+        } else {
+            format!("**/{}", pattern)
+        };
+
+        let full = base.join(&effective);
+        let full_str = full.to_string_lossy();
+
+        let mut results = Vec::new();
+        for entry in glob::glob(&full_str)
+            .map_err(|e| format!("Invalid glob pattern: {}", e))?
+        {
+            if results.len() >= max_results {
+                break;
+            }
+            if let Ok(path) = entry {
+                let rel = path.strip_prefix(&base).unwrap_or(&path);
+                results.push(rel.display().to_string());
+            }
+        }
+
+        format_find_results(results, max_results)
+    } else {
+        // ── Keyword mode — case-insensitive substring match ─────────
+        // Multiple space-separated keywords: file matches if its name
+        // contains ANY of them.
+        let keywords: Vec<String> = pattern
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+
+        if keywords.is_empty() {
+            return Err("pattern must not be empty".to_string());
+        }
+
+        let mut results = Vec::new();
+
+        for entry in walkdir::WalkDir::new(&base)
+            .follow_links(true)
+            .max_depth(8)
+            .into_iter()
+            .filter_entry(should_visit)
+        {
+            if results.len() >= max_results {
+                break;
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let name_lower = entry.file_name().to_string_lossy().to_lowercase();
+            if keywords.iter().any(|kw| name_lower.contains(kw.as_str())) {
+                let rel = entry
+                    .path()
+                    .strip_prefix(&base)
+                    .unwrap_or(entry.path());
+                results.push(rel.display().to_string());
+            }
+        }
+
+        format_find_results(results, max_results)
+    }
+}
+
+fn format_find_results(results: Vec<String>, max_results: usize) -> Result<String, String> {
+    if results.is_empty() {
+        Ok("No files found.".to_string())
+    } else {
+        let count = results.len();
+        let mut output = results.join("\n");
+        if count >= max_results {
+            output.push_str(&format!(
+                "\n\n(Results truncated at {} files)",
+                max_results
+            ));
+        }
+        Ok(output)
+    }
+}
+
+fn exec_execute_command(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let command = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: command".to_string())?;
+    let working_dir = args.get("working_dir").and_then(|v| v.as_str());
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30);
+
+    let cwd = match working_dir {
+        Some(p) => resolve_path(workspace_dir, p),
+        None => workspace_dir.to_path_buf(),
+    };
+
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    // Poll for completion with a timeout.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return Err(format!(
+                        "Command timed out after {} seconds",
+                        timeout_secs
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("Error waiting for command: {}", e)),
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to get command output: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut result = String::new();
+    if !stdout.is_empty() {
+        result.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str("[stderr]\n");
+        result.push_str(&stderr);
+    }
+
+    if !output.status.success() {
+        let exit = output.status.code().unwrap_or(-1);
+        result.push_str(&format!("\n[exit code: {}]", exit));
+    }
+
+    // Truncate very long output.
+    if result.len() > 50_000 {
+        result.truncate(50_000);
+        result.push_str("\n\n[output truncated at 50KB]");
+    }
+
+    if result.is_empty() {
+        result = "(no output)".to_string();
+    }
+
+    Ok(result)
+}
+
 // ── Provider-specific formatters ────────────────────────────────────────────
 
 /// Parameters for a tool, building a JSON Schema `properties` / `required`.
@@ -146,6 +767,12 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
     }
     match tool.name {
         "read_file" => read_file_params(),
+        "write_file" => write_file_params(),
+        "edit_file" => edit_file_params(),
+        "list_directory" => list_directory_params(),
+        "search_files" => search_files_params(),
+        "find_files" => find_files_params(),
+        "execute_command" => execute_command_params(),
         _ => vec![],
     }
 }
@@ -228,10 +855,10 @@ pub fn tools_google() -> Vec<Value> {
 // ── Tool execution ──────────────────────────────────────────────────────────
 
 /// Find a tool by name and execute it with the given arguments.
-pub fn execute_tool(name: &str, args: &Value) -> Result<String, String> {
+pub fn execute_tool(name: &str, args: &Value, workspace_dir: &Path) -> Result<String, String> {
     for tool in all_tools() {
         if tool.name == name {
-            return (tool.execute)(args);
+            return (tool.execute)(args, workspace_dir);
         }
     }
     Err(format!("Unknown tool: {}", name))
@@ -260,11 +887,19 @@ pub struct ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// Helper: return the project root as workspace dir for tests.
+    fn ws() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    // ── read_file ───────────────────────────────────────────────────
 
     #[test]
     fn test_read_file_this_file() {
         let args = json!({ "path": file!(), "start_line": 1, "end_line": 5 });
-        let result = exec_read_file(&args);
+        let result = exec_read_file(&args, ws());
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(text.contains("Agent tool system"));
@@ -273,35 +908,215 @@ mod tests {
     #[test]
     fn test_read_file_missing() {
         let args = json!({ "path": "/nonexistent/file.txt" });
-        let result = exec_read_file(&args);
+        let result = exec_read_file(&args, ws());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_read_file_no_path() {
         let args = json!({});
-        let result = exec_read_file(&args);
+        let result = exec_read_file(&args, ws());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
 
     #[test]
+    fn test_read_file_relative() {
+        // Relative path should resolve against workspace_dir.
+        let args = json!({ "path": "Cargo.toml", "start_line": 1, "end_line": 3 });
+        let result = exec_read_file(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("package"));
+    }
+
+    // ── write_file ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_write_file_and_read_back() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_write");
+        let _ = std::fs::remove_dir_all(&dir);
+        let args = json!({
+            "path": "sub/test.txt",
+            "content": "hello world"
+        });
+        let result = exec_write_file(&args, &dir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("11 bytes"));
+
+        let content = std::fs::read_to_string(dir.join("sub/test.txt")).unwrap();
+        assert_eq!(content, "hello world");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── edit_file ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_edit_file_single_match() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_edit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "aaa\nbbb\nccc\n").unwrap();
+
+        let args = json!({ "path": "f.txt", "old_string": "bbb", "new_string": "BBB" });
+        let result = exec_edit_file(&args, &dir);
+        assert!(result.is_ok());
+
+        let content = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert_eq!(content, "aaa\nBBB\nccc\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_edit_file_no_match() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_edit_no");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "aaa\nbbb\n").unwrap();
+
+        let args = json!({ "path": "f.txt", "old_string": "zzz", "new_string": "ZZZ" });
+        let result = exec_edit_file(&args, &dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_edit_file_multiple_matches() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_edit_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "aaa\naaa\n").unwrap();
+
+        let args = json!({ "path": "f.txt", "old_string": "aaa", "new_string": "bbb" });
+        let result = exec_edit_file(&args, &dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("2 times"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── list_directory ──────────────────────────────────────────────
+
+    #[test]
+    fn test_list_directory() {
+        let args = json!({ "path": "src" });
+        let result = exec_list_directory(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("tools.rs"));
+        assert!(text.contains("main.rs"));
+    }
+
+    // ── search_files ────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_files_finds_pattern() {
+        let args = json!({ "pattern": "exec_read_file", "path": "src", "include": "*.rs" });
+        let result = exec_search_files(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("tools.rs"));
+    }
+
+    #[test]
+    fn test_search_files_no_match() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_search_none");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+
+        let args = json!({ "pattern": "XYZZY_NEVER_42" });
+        let result = exec_search_files(&args, &dir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("No matches"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── find_files ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_find_files_glob() {
+        let args = json!({ "pattern": "*.toml" });
+        let result = exec_find_files(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_find_files_keyword_case_insensitive() {
+        // "cargo" should match "Cargo.toml" (case-insensitive).
+        let args = json!({ "pattern": "cargo" });
+        let result = exec_find_files(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_find_files_multiple_keywords() {
+        // Space-separated keywords: match ANY.
+        let args = json!({ "pattern": "cargo license" });
+        let result = exec_find_files(&args, ws());
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("Cargo.toml"));
+        assert!(text.contains("LICENSE"));
+    }
+
+    #[test]
+    fn test_find_files_keyword_no_match() {
+        let dir = std::env::temp_dir().join("rustyclaw_test_find_kw");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), "content").unwrap();
+
+        let args = json!({ "pattern": "resume" });
+        let result = exec_find_files(&args, &dir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("No files found"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── execute_command ─────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_command_echo() {
+        let args = json!({ "command": "echo hello" });
+        let result = exec_execute_command(&args, ws());
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn test_execute_command_failure() {
+        let args = json!({ "command": "false" });
+        let result = exec_execute_command(&args, ws());
+        assert!(result.is_ok()); // still returns Ok with exit code
+        assert!(result.unwrap().contains("exit code"));
+    }
+
+    // ── execute_tool dispatch ───────────────────────────────────────
+
+    #[test]
     fn test_execute_tool_dispatch() {
         let args = json!({ "path": file!() });
-        let result = execute_tool("read_file", &args);
+        let result = execute_tool("read_file", &args, ws());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_execute_tool_unknown() {
-        let result = execute_tool("no_such_tool", &json!({}));
+        let result = execute_tool("no_such_tool", &json!({}), ws());
         assert!(result.is_err());
     }
+
+    // ── Provider format tests ───────────────────────────────────────
 
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert!(!tools.is_empty());
+        assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -310,7 +1125,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert!(!tools.is_empty());
+        assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -318,7 +1133,21 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert!(!tools.is_empty());
+        assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["name"], "read_file");
+    }
+
+    // ── resolve_path helper ─────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_path_absolute() {
+        let result = resolve_path(Path::new("/workspace"), "/absolute/path.txt");
+        assert_eq!(result, PathBuf::from("/absolute/path.txt"));
+    }
+
+    #[test]
+    fn test_resolve_path_relative() {
+        let result = resolve_path(Path::new("/workspace"), "relative/path.txt");
+        assert_eq!(result, PathBuf::from("/workspace/relative/path.txt"));
     }
 }

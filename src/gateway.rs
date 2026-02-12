@@ -881,12 +881,14 @@ async fn handle_connection(
                             }
                         }
 
+                        let workspace_dir = config.workspace_dir();
                         if let Err(err) = dispatch_text_message(
                             &http,
                             text.as_str(),
                             model_ctx.as_deref(),
                             copilot_session.as_deref(),
                             &mut writer,
+                            &workspace_dir,
                         )
                         .await
                         {
@@ -971,6 +973,7 @@ async fn dispatch_text_message(
     model_ctx: Option<&ModelContext>,
     copilot_session: Option<&CopilotSession>,
     writer: &mut WsWriter,
+    workspace_dir: &std::path::Path,
 ) -> Result<()> {
     // Try to parse as a structured JSON request.
     let req = match serde_json::from_str::<ChatRequest>(text) {
@@ -1093,7 +1096,7 @@ async fn dispatch_text_message(
                 .context("Failed to send tool_call frame")?;
 
             // Execute the tool.
-            let (output, is_error) = match tools::execute_tool(&tc.name, &tc.arguments) {
+            let (output, is_error) = match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
                 Ok(text) => (text, false),
                 Err(err) => (err, true),
             };
