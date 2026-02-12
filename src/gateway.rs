@@ -35,6 +35,45 @@ const TOTP_LOCKOUT_SECS: u64 = 30;
 /// Window within which failures are counted (resets after this).
 const TOTP_FAILURE_WINDOW_SECS: u64 = 60;
 
+/// Compaction fires when estimated usage exceeds this fraction of the context window.
+const COMPACTION_THRESHOLD: f64 = 0.75;
+/// After compaction, we aim to keep this fraction of the window for fresh context.
+const COMPACTION_TARGET: f64 = 0.40;
+
+/// Return the context-window size (in tokens) for a given model name.
+/// Conservative defaults — these are *input* token limits.
+fn context_window_for_model(model: &str) -> usize {
+    let m = model.to_lowercase();
+    // Anthropic
+    if m.contains("claude-opus")   { return 200_000; }
+    if m.contains("claude-sonnet") { return 200_000; }
+    if m.contains("claude-haiku")  { return 200_000; }
+    // OpenAI
+    if m.starts_with("gpt-4.1")    { return 1_000_000; }
+    if m.starts_with("o3") || m.starts_with("o4") { return 200_000; }
+    // Google Gemini
+    if m.contains("gemini-2.5-pro")  { return 1_000_000; }
+    if m.contains("gemini-2.5-flash") { return 1_000_000; }
+    if m.contains("gemini-2.0-flash") { return 1_000_000; }
+    // xAI
+    if m.contains("grok-3")  { return 131_072; }
+    // Ollama / unknown — conservative
+    if m.contains("llama")   { return 128_000; }
+    if m.contains("mistral") { return 128_000; }
+    if m.contains("deepseek") { return 128_000; }
+    // Fallback: 128k is a safe default for modern models
+    128_000
+}
+
+/// Fast token estimate: roughly 1 token ≈ 4 characters for English text.
+/// This is intentionally conservative (over-estimates) to trigger compaction
+/// early rather than hitting the provider's hard limit.
+fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+    let total_chars: usize = messages.iter().map(|m| m.role.len() + m.content.len()).sum();
+    // ~3.5 chars/token for English; we round down to be conservative.
+    total_chars / 3
+}
+
 /// Per-IP TOTP failure tracking.
 #[derive(Debug, Clone)]
 struct TotpAttempt {
@@ -1043,7 +1082,36 @@ async fn dispatch_text_message(
     // ── Agentic tool loop ───────────────────────────────────────────
     const MAX_TOOL_ROUNDS: usize = 25;
 
+    let context_limit = context_window_for_model(&resolved.model);
+
     for _round in 0..MAX_TOOL_ROUNDS {
+        // ── Auto-compact if context is getting large ────────────────
+        let estimated = estimate_tokens(&resolved.messages);
+        let threshold = (context_limit as f64 * COMPACTION_THRESHOLD) as usize;
+        if estimated > threshold {
+            match compact_conversation(
+                http,
+                &mut resolved,
+                context_limit,
+                writer,
+            )
+            .await
+            {
+                Ok(()) => {} // compacted in-place
+                Err(err) => {
+                    // Non-fatal — log a warning and keep going with the
+                    // full context; the provider may still accept it.
+                    let warn_frame = json!({
+                        "type": "info",
+                        "message": format!("Context compaction failed: {}", err),
+                    });
+                    let _ = writer
+                        .send(Message::Text(warn_frame.to_string().into()))
+                        .await;
+                }
+            }
+        }
+
         let result = if resolved.provider == "anthropic" {
             call_anthropic_with_tools(http, &resolved).await
         } else if resolved.provider == "google" {
@@ -1167,6 +1235,136 @@ async fn send_response_done(writer: &mut WsWriter) -> Result<()> {
         .context("Failed to send response_done frame")
 }
 
+// ── Context compaction ──────────────────────────────────────────────────────
+
+/// Compact the conversation by summarizing older turns.
+///
+/// Strategy:
+/// 1. Keep the system prompt (first message if role == "system").
+/// 2. Keep the most recent turns that fit in COMPACTION_TARGET of the window.
+/// 3. Ask the model to produce a concise summary of the middle (old) turns.
+/// 4. Replace those old turns with a single assistant "summary" message.
+///
+/// This modifies `resolved.messages` in-place.
+async fn compact_conversation(
+    http: &reqwest::Client,
+    resolved: &mut ProviderRequest,
+    context_limit: usize,
+    writer: &mut WsWriter,
+) -> Result<()> {
+    let msgs = &resolved.messages;
+    if msgs.len() < 4 {
+        // Too few messages to compact meaningfully.
+        return Ok(());
+    }
+
+    // Separate system prompt from the rest.
+    let has_system = msgs.first().is_some_and(|m| m.role == "system");
+    let start_idx = if has_system { 1 } else { 0 };
+
+    // Walk backwards to find how many recent turns fit in the target budget.
+    let target_tokens = (context_limit as f64 * COMPACTION_TARGET) as usize;
+    let mut tail_tokens = 0usize;
+    let mut keep_from = msgs.len(); // index where "recent" messages start
+    for i in (start_idx..msgs.len()).rev() {
+        let msg_tokens = (msgs[i].role.len() + msgs[i].content.len()) / 3;
+        if tail_tokens + msg_tokens > target_tokens {
+            break;
+        }
+        tail_tokens += msg_tokens;
+        keep_from = i;
+    }
+
+    // The middle section to summarize: everything between system and keep_from.
+    if keep_from <= start_idx + 1 {
+        // Nothing meaningful to summarize.
+        return Ok(());
+    }
+
+    let old_turns = &msgs[start_idx..keep_from];
+
+    // Build a summary prompt.
+    let mut summary_text = String::from(
+        "Summarize the following conversation turns into a concise context recap. \
+         Preserve key facts, decisions, file paths, tool results, and user preferences. \
+         Keep it under 500 words. Output only the summary, no preamble.\n\n",
+    );
+    for m in old_turns {
+        // Truncate very large tool results to avoid blowing up the summary request.
+        let content = if m.content.len() > 2000 {
+            format!("{}… [truncated]", &m.content[..2000])
+        } else {
+            m.content.clone()
+        };
+        summary_text.push_str(&format!("[{}]: {}\n\n", m.role, content));
+    }
+
+    // Call the model to produce the summary (simple request, no tools).
+    let summary_req = ProviderRequest {
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: summary_text,
+        }],
+        model: resolved.model.clone(),
+        provider: resolved.provider.clone(),
+        base_url: resolved.base_url.clone(),
+        api_key: resolved.api_key.clone(),
+    };
+
+    let summary_result = if resolved.provider == "anthropic" {
+        call_anthropic_with_tools(http, &summary_req).await
+    } else if resolved.provider == "google" {
+        call_google_with_tools(http, &summary_req).await
+    } else {
+        call_openai_with_tools(http, &summary_req).await
+    };
+
+    let summary = match summary_result {
+        Ok(resp) if !resp.text.is_empty() => resp.text,
+        Ok(_) => anyhow::bail!("Model returned empty summary"),
+        Err(e) => anyhow::bail!("Summary request failed: {}", e),
+    };
+
+    // Rebuild messages: system + summary + recent turns.
+    let mut new_messages = Vec::new();
+    if has_system {
+        new_messages.push(msgs[0].clone());
+    }
+    new_messages.push(ChatMessage {
+        role: "assistant".into(),
+        content: format!(
+            "[Conversation summary — older messages were compacted to save context]\n\n{}",
+            summary,
+        ),
+    });
+    new_messages.extend_from_slice(&msgs[keep_from..]);
+
+    let old_count = msgs.len();
+    let new_count = new_messages.len();
+    let old_tokens = estimate_tokens(msgs);
+    let new_tokens = estimate_tokens(&new_messages);
+
+    resolved.messages = new_messages;
+
+    // Notify the client.
+    let info_frame = json!({
+        "type": "info",
+        "message": format!(
+            "Context compacted: {} → {} messages (~{}k → ~{}k tokens)",
+            old_count,
+            new_count,
+            old_tokens / 1000,
+            new_tokens / 1000,
+        ),
+    });
+    writer
+        .send(Message::Text(info_frame.to_string().into()))
+        .await
+        .context("Failed to send compaction info frame")?;
+
+    Ok(())
+}
+
 // ── Model response types (shared across providers) ──────────────────────────
 
 /// A parsed tool call from the model.
@@ -1191,6 +1389,9 @@ struct ToolCallResult {
 struct ModelResponse {
     text: String,
     tool_calls: Vec<ParsedToolCall>,
+    /// Token counts reported by the provider (when available).
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
 }
 
 /// Append the model's assistant turn and tool results to the conversation
@@ -1409,6 +1610,12 @@ async fn call_openai_with_tools(
         }
     }
 
+    // Extract token usage if present.
+    if let Some(usage) = data.get("usage") {
+        result.prompt_tokens = usage["prompt_tokens"].as_u64();
+        result.completion_tokens = usage["completion_tokens"].as_u64();
+    }
+
     Ok(result)
 }
 
@@ -1506,6 +1713,12 @@ async fn call_anthropic_with_tools(
         }
     }
 
+    // Extract token usage if present.
+    if let Some(usage) = data.get("usage") {
+        result.prompt_tokens = usage["input_tokens"].as_u64();
+        result.completion_tokens = usage["output_tokens"].as_u64();
+    }
+
     Ok(result)
 }
 
@@ -1594,6 +1807,12 @@ async fn call_google_with_tools(
                 });
             }
         }
+    }
+
+    // Extract token usage if present.
+    if let Some(usage) = data.get("usageMetadata") {
+        result.prompt_tokens = usage["promptTokenCount"].as_u64();
+        result.completion_tokens = usage["candidatesTokenCount"].as_u64();
     }
 
     Ok(result)

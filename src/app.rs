@@ -852,6 +852,18 @@ impl App {
                     return Ok(Some(Action::Update));
                 }
 
+                // ── Handle info/notification frames ──────────────────
+                if frame_type == Some("info") {
+                    let message = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                        .unwrap_or("");
+                    if !message.is_empty() {
+                        self.state.messages.push(DisplayMessage::info(message));
+                    }
+                    return Ok(Some(Action::Update));
+                }
+
                 // ── Handle streaming chunk frames ────────────────────
                 if frame_type == Some("chunk") {
                     let delta = parsed
