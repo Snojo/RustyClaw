@@ -127,10 +127,12 @@ pub const PROVIDERS: &[ProviderDef] = &[
         device_flow: Some(&GITHUB_COPILOT_DEVICE_FLOW),
         base_url: Some("https://api.githubcopilot.com"),
         models: &[
-            "gpt-4o",
-            "gpt-4o-mini",
-            "o1-preview",
-            "o1-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "o3",
+            "o4-mini",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
         ],
     },
     ProviderDef {
@@ -253,9 +255,48 @@ pub async fn fetch_models(
     }
 }
 
+/// Non-chat model ID patterns.  Any model whose ID contains one of these
+/// substrings (case-insensitive) is filtered out of the selector.
+const NON_CHAT_PATTERNS: &[&str] = &[
+    "embed", "tts", "whisper", "dall-e", "davinci", "babbage",
+    "moderation", "search", "similarity", "code-search",
+    "text-search", "audio", "realtime", "transcri",
+    "computer-use", "canary", // internal/experimental
+];
+
+/// Check whether a model entry looks like it supports chat completions.
+///
+/// 1. If the entry has `capabilities.chat` (GitHub Copilot style),
+///    use that.
+/// 2. Otherwise fall back to filtering out known non-chat ID patterns.
+fn is_chat_model(entry: &serde_json::Value) -> bool {
+    // GitHub Copilot and some providers expose capabilities metadata.
+    if let Some(caps) = entry.get("capabilities") {
+        return caps
+            .get("chat")
+            .or_else(|| caps.get("type").filter(|v| v.as_str() == Some("chat")))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+
+    // Some endpoints use object type "model" vs "embedding" etc.
+    if let Some(obj) = entry.get("object").and_then(|v| v.as_str()) {
+        if obj != "model" {
+            return false;
+        }
+    }
+
+    // Fall back to ID pattern matching.
+    let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let lower = id.to_lowercase();
+    !NON_CHAT_PATTERNS.iter().any(|pat| lower.contains(pat))
+}
+
 /// Fetch from an OpenAI-compatible `/models` endpoint.
 ///
-/// Works for OpenAI, xAI, OpenRouter, Ollama, and custom providers.
+/// Works for OpenAI, xAI, OpenRouter, Ollama, GitHub Copilot, and
+/// custom providers.  Only models that appear to support chat
+/// completions are returned (see [`is_chat_model`]).
 async fn fetch_openai_compatible_models(
     base_url: &str,
     api_key: Option<&str>,
@@ -274,17 +315,19 @@ async fn fetch_openai_compatible_models(
     let resp = req.send().await?.error_for_status()?;
     let body: serde_json::Value = resp.json().await?;
 
-    let models = body
+    let mut models: Vec<String> = body
         .get("data")
         .and_then(|d| d.as_array())
         .map(|arr| {
             arr.iter()
+                .filter(|m| is_chat_model(m))
                 .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
                 .map(|s| s.to_string())
-                .collect::<Vec<_>>()
+                .collect()
         })
         .unwrap_or_default();
 
+    models.sort();
     Ok(models)
 }
 
@@ -443,6 +486,55 @@ pub async fn poll_device_token(
     }
 }
 
+// ── Copilot session token exchange ──────────────────────────────────────────
+
+/// Response from the Copilot internal token endpoint.
+///
+/// The `token` field is a short-lived session token (valid ~30 min).
+/// `expires_at` is a Unix timestamp indicating when it expires.
+#[derive(Debug, Deserialize)]
+pub struct CopilotSessionResponse {
+    pub token: String,
+    pub expires_at: i64,
+}
+
+/// Exchange a GitHub OAuth token for a short-lived Copilot API session token.
+///
+/// The Copilot chat API (`api.githubcopilot.com`) requires a session token
+/// obtained by presenting the long-lived OAuth device-flow token to
+/// GitHub's internal token endpoint.  Session tokens expire after ~30
+/// minutes; the caller should cache and refresh before `expires_at`.
+pub async fn exchange_copilot_session(
+    http: &reqwest::Client,
+    oauth_token: &str,
+) -> Result<CopilotSessionResponse, String> {
+    let resp = http
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("token {}", oauth_token))
+        .header("User-Agent", "RustyClaw")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to exchange Copilot token: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Copilot token exchange returned {} — {}",
+            status, body,
+        ));
+    }
+
+    resp.json::<CopilotSessionResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse Copilot session response: {}", e))
+}
+
+/// Whether the given provider requires Copilot session-token exchange.
+pub fn needs_copilot_session(provider_id: &str) -> bool {
+    matches!(provider_id, "github-copilot" | "copilot-proxy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,7 +581,7 @@ mod tests {
         let provider = provider_by_id("github-copilot").unwrap();
         assert_eq!(provider.id, "github-copilot");
         assert_eq!(provider.secret_key, Some("GITHUB_COPILOT_TOKEN"));
-        
+
         let device_config = provider.device_flow.unwrap();
         assert_eq!(device_config.device_auth_url, "https://github.com/login/device/code");
         assert_eq!(device_config.token_url, "https://github.com/login/oauth/access_token");
@@ -502,7 +594,7 @@ mod tests {
         assert_eq!(provider.id, "copilot-proxy");
         assert_eq!(provider.secret_key, Some("COPILOT_PROXY_TOKEN"));
         assert_eq!(provider.base_url, None); // Should prompt for URL
-        
+
         let device_config = provider.device_flow.unwrap();
         // Should use same device flow as github-copilot
         assert_eq!(device_config.device_auth_url, "https://github.com/login/device/code");
@@ -541,7 +633,7 @@ mod tests {
             // Verify auth consistency
             match provider.auth_method {
                 AuthMethod::ApiKey => {
-                    assert!(provider.secret_key.is_some(), 
+                    assert!(provider.secret_key.is_some(),
                         "Provider {} with ApiKey auth must have secret_key", provider.id);
                     assert!(provider.device_flow.is_none(),
                         "Provider {} with ApiKey auth should not have device_flow", provider.id);
@@ -560,5 +652,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_needs_copilot_session() {
+        assert!(needs_copilot_session("github-copilot"));
+        assert!(needs_copilot_session("copilot-proxy"));
+        assert!(!needs_copilot_session("openai"));
+        assert!(!needs_copilot_session("anthropic"));
+        assert!(!needs_copilot_session("google"));
+        assert!(!needs_copilot_session("ollama"));
+        assert!(!needs_copilot_session("custom"));
+    }
+
+    #[test]
+    fn test_copilot_session_response_parsing() {
+        let json = r#"{"token":"tid=abc123;exp=9999999999","expires_at":1750000000}"#;
+        let resp: CopilotSessionResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.token.starts_with("tid="));
+        assert_eq!(resp.expires_at, 1750000000);
     }
 }

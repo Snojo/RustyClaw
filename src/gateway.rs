@@ -107,6 +107,85 @@ impl ModelContext {
     }
 }
 
+// ── Copilot session token cache ──────────────────────────────────────────────
+
+/// Manages a short-lived Copilot session token, auto-refreshing on expiry.
+///
+/// GitHub Copilot's chat API requires a session token obtained by
+/// exchanging the long-lived OAuth device-flow token.  Session tokens
+/// expire after ~30 minutes.  This struct caches the active session and
+/// transparently refreshes it when needed.
+pub struct CopilotSession {
+    oauth_token: String,
+    inner: tokio::sync::Mutex<Option<CopilotSessionEntry>>,
+}
+
+struct CopilotSessionEntry {
+    token: String,
+    expires_at: i64,
+}
+
+impl CopilotSession {
+    /// Create a new session manager wrapping the given OAuth token.
+    pub fn new(oauth_token: String) -> Self {
+        Self {
+            oauth_token,
+            inner: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Return a valid session token, exchanging or refreshing as needed.
+    ///
+    /// Caches the token and only calls the exchange endpoint when the
+    /// cached token is missing or within 60 seconds of expiry.
+    pub async fn get_token(&self, http: &reqwest::Client) -> Result<String> {
+        let mut guard = self.inner.lock().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Return cached token if still valid (with 60 s safety margin).
+        if let Some(ref entry) = *guard {
+            if now < entry.expires_at - 60 {
+                return Ok(entry.token.clone());
+            }
+        }
+
+        // Exchange the OAuth token for a fresh session token.
+        let session = providers::exchange_copilot_session(http, &self.oauth_token)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let token = session.token.clone();
+        *guard = Some(CopilotSessionEntry {
+            token: session.token,
+            expires_at: session.expires_at,
+        });
+        Ok(token)
+    }
+}
+
+/// Resolve the effective bearer token for an API call.
+///
+/// For Copilot providers the raw API key is an OAuth token that must be
+/// exchanged for a short-lived session token.  For all other providers
+/// the raw key is returned as-is.
+async fn resolve_bearer_token(
+    http: &reqwest::Client,
+    provider: &str,
+    raw_key: Option<&str>,
+    session: Option<&CopilotSession>,
+) -> Result<Option<String>> {
+    if providers::needs_copilot_session(provider) {
+        if let Some(session) = session {
+            return Ok(Some(session.get_token(http).await?));
+        }
+    }
+    Ok(raw_key.map(String::from))
+}
+
 // ── Status reporting ─────────────────────────────────────────────────────────
 
 /// Build a JSON status frame to push to connected clients.
@@ -144,12 +223,33 @@ pub enum ProbeResult {
 /// - **Anthropic**: `POST /v1/messages` with `max_tokens: 1`.
 /// - **Google Gemini**: `GET /models/{model}` metadata endpoint.
 ///
+/// For Copilot providers the optional [`CopilotSession`] is used to
+/// exchange the OAuth token for a session token before probing.
+///
 /// Returns a [`ProbeResult`] that lets the caller distinguish between
 /// "fully ready", "connected with a warning", and "hard failure".
 pub async fn validate_model_connection(
     http: &reqwest::Client,
     ctx: &ModelContext,
+    copilot_session: Option<&CopilotSession>,
 ) -> ProbeResult {
+    // Resolve the bearer token (session token for Copilot, raw key otherwise).
+    let effective_key = match resolve_bearer_token(
+        http,
+        &ctx.provider,
+        ctx.api_key.as_deref(),
+        copilot_session,
+    )
+    .await
+    {
+        Ok(k) => k,
+        Err(err) => {
+            return ProbeResult::AuthError {
+                detail: format!("Token exchange failed: {}", err),
+            };
+        }
+    };
+
     let result: Result<reqwest::Response> = if ctx.provider == "anthropic" {
         // Anthropic has no /models list endpoint — use a minimal chat.
         let url = format!("{}/v1/messages", ctx.base_url.trim_end_matches('/'));
@@ -182,9 +282,10 @@ pub async fn validate_model_connection(
         // OpenAI-compatible: GET /models — lightweight auth check.
         let url = format!("{}/models", ctx.base_url.trim_end_matches('/'));
         let mut builder = http.get(&url);
-        if let Some(ref key) = ctx.api_key {
+        if let Some(ref key) = effective_key {
             builder = builder.bearer_auth(key);
         }
+        builder = apply_copilot_headers(builder, &ctx.provider);
         builder
             .send()
             .await
@@ -328,6 +429,14 @@ pub async fn run_gateway(
         .await
         .with_context(|| format!("Failed to bind gateway to {}", addr))?;
 
+    // If the provider uses Copilot session tokens, wrap the OAuth token in
+    // a CopilotSession so all connections share the same cached session.
+    let copilot_session: Option<Arc<CopilotSession>> = model_ctx
+        .as_ref()
+        .filter(|ctx| providers::needs_copilot_session(&ctx.provider))
+        .and_then(|ctx| ctx.api_key.clone())
+        .map(|oauth| Arc::new(CopilotSession::new(oauth)));
+
     let model_ctx = model_ctx.map(Arc::new);
 
     loop {
@@ -339,9 +448,10 @@ pub async fn run_gateway(
                 let (stream, peer) = accepted?;
                 let config_clone = config.clone();
                 let ctx_clone = model_ctx.clone();
+                let session_clone = copilot_session.clone();
                 let child_cancel = cancel.child_token();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, peer, config_clone, ctx_clone, child_cancel).await {
+                    if let Err(err) = handle_connection(stream, peer, config_clone, ctx_clone, session_clone, child_cancel).await {
                         eprintln!("Gateway connection error from {}: {}", peer, err);
                     }
                 });
@@ -376,6 +486,7 @@ async fn handle_connection(
     _peer: SocketAddr,
     config: Config,
     model_ctx: Option<Arc<ModelContext>>,
+    copilot_session: Option<Arc<CopilotSession>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let ws_stream = tokio_tungstenite::accept_async(stream)
@@ -437,6 +548,9 @@ async fn handle_connection(
             }
 
             // 3. Validate the connection with a lightweight probe
+            //
+            // For Copilot providers, exchange the OAuth token for a session
+            // token first — the probe must use the session token too.
             writer
                 .send(Message::Text(
                     status_frame("model_connecting", &format!("Probing {} …", ctx.base_url))
@@ -445,7 +559,7 @@ async fn handle_connection(
                 .await
                 .context("Failed to send model_connecting status")?;
 
-            match validate_model_connection(&http, ctx).await {
+            match validate_model_connection(&http, ctx, copilot_session.as_deref()).await {
                 ProbeResult::Ready => {
                     writer
                         .send(Message::Text(
@@ -527,7 +641,7 @@ async fn handle_connection(
                 };
                 match message {
                     Message::Text(text) => {
-                        let response = handle_text_message(&http, text.as_str(), model_ctx.as_deref()).await;
+                        let response = handle_text_message(&http, text.as_str(), model_ctx.as_deref(), copilot_session.as_deref()).await;
                         writer
                             .send(Message::Text(response.into()))
                             .await
@@ -565,6 +679,7 @@ async fn handle_text_message(
     http: &reqwest::Client,
     text: &str,
     model_ctx: Option<&ModelContext>,
+    copilot_session: Option<&CopilotSession>,
 ) -> String {
     // Try to parse as a structured JSON request.
     let req = match serde_json::from_str::<ChatRequest>(text) {
@@ -587,7 +702,7 @@ async fn handle_text_message(
         }
     };
 
-    handle_chat_request(http, req, model_ctx).await
+    handle_chat_request(http, req, model_ctx, copilot_session).await
 }
 
 /// Call the model provider and return the assistant's reply.
@@ -595,8 +710,9 @@ async fn handle_chat_request(
     http: &reqwest::Client,
     req: ChatRequest,
     model_ctx: Option<&ModelContext>,
+    copilot_session: Option<&CopilotSession>,
 ) -> String {
-    let resolved = match resolve_request(req, model_ctx) {
+    let mut resolved = match resolve_request(req, model_ctx) {
         Ok(r) => r,
         Err(msg) => {
             return json!({
@@ -607,6 +723,26 @@ async fn handle_chat_request(
             .to_string()
         }
     };
+
+    // For Copilot providers, swap the raw OAuth token for a session token.
+    match resolve_bearer_token(
+        http,
+        &resolved.provider,
+        resolved.api_key.as_deref(),
+        copilot_session,
+    )
+    .await
+    {
+        Ok(token) => resolved.api_key = token,
+        Err(err) => {
+            return json!({
+                "type": "error",
+                "ok": false,
+                "message": format!("Token exchange failed: {}", err),
+            })
+            .to_string()
+        }
+    }
 
     let result = if resolved.provider == "anthropic" {
         call_anthropic(http, &resolved).await
@@ -636,6 +772,26 @@ async fn handle_chat_request(
 
 // ── Provider-specific callers ───────────────────────────────────────────────
 
+/// Attach GitHub-Copilot-required IDE headers to a request builder.
+///
+/// The Copilot API rejects requests that lack `Editor-Version`,
+/// `Editor-Plugin-Version`, `Copilot-Integration-Id`, and `openai-intent`.
+/// This is a no-op for non-Copilot providers.
+fn apply_copilot_headers(
+    builder: reqwest::RequestBuilder,
+    provider: &str,
+) -> reqwest::RequestBuilder {
+    if !providers::needs_copilot_session(provider) {
+        return builder;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    builder
+        .header("Editor-Version", format!("RustyClaw/{}", version))
+        .header("Editor-Plugin-Version", format!("rustyclaw/{}", version))
+        .header("Copilot-Integration-Id", "rustyclaw")
+        .header("openai-intent", "conversation-panel")
+}
+
 /// Call an OpenAI-compatible `/chat/completions` endpoint.
 async fn call_openai_compatible(http: &reqwest::Client, req: &ProviderRequest) -> Result<String> {
     let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
@@ -648,6 +804,7 @@ async fn call_openai_compatible(http: &reqwest::Client, req: &ProviderRequest) -
     if let Some(ref key) = req.api_key {
         builder = builder.bearer_auth(key);
     }
+    builder = apply_copilot_headers(builder, &req.provider);
 
     let resp = builder
         .send()
