@@ -17,7 +17,7 @@ use crate::pages::home::Home;
 use crate::pages::Page;
 use crate::panes::footer::FooterPane;
 use crate::panes::header::HeaderPane;
-use crate::panes::{GatewayStatus, InputMode, Pane, PaneState};
+use crate::panes::{DisplayMessage, GatewayStatus, InputMode, Pane, PaneState};
 use crate::providers;
 use crate::secrets::SecretsManager;
 use crate::skills::SkillManager;
@@ -163,7 +163,7 @@ struct SecretViewerState {
 /// independently.
 struct SharedState {
     config: Config,
-    messages: Vec<String>,
+    messages: Vec<DisplayMessage>,
     input_mode: InputMode,
     secrets_manager: SecretsManager,
     skill_manager: SkillManager,
@@ -205,6 +205,10 @@ pub struct App {
     reader_task: Option<JoinHandle<()>>,
     /// Whether the skills dialog overlay is visible
     show_skills_dialog: bool,
+    /// Whether the secrets dialog overlay is visible
+    show_secrets_dialog: bool,
+    /// Scroll offset in the secrets dialog
+    secrets_scroll: usize,
     /// API-key dialog state
     api_key_dialog: Option<ApiKeyDialogState>,
     /// Model-selector dialog state
@@ -213,6 +217,8 @@ pub struct App {
     fetch_loading: Option<FetchModelsLoading>,
     /// Loading spinner shown during device flow authentication
     device_flow_loading: Option<FetchModelsLoading>,
+    /// Tick counter for spinner while waiting for model response
+    chat_loading_tick: Option<usize>,
     /// Provider-selector dialog state
     provider_selector: Option<ProviderSelectorState>,
     /// Credential-management dialog state
@@ -296,7 +302,7 @@ impl App {
 
         let state = SharedState {
             config,
-            messages: vec!["Welcome to RustyClaw! Type /help for commands.".to_string()],
+            messages: vec![DisplayMessage::info("Welcome to RustyClaw! Type /help for commands.")],
             input_mode: InputMode::Normal,
             secrets_manager,
             skill_manager,
@@ -318,10 +324,13 @@ impl App {
             ws_sink: None,
             reader_task: None,
             show_skills_dialog: false,
+            show_secrets_dialog: false,
+            secrets_scroll: 0,
             api_key_dialog: None,
             model_selector: None,
             fetch_loading: None,
             device_flow_loading: None,
+            chat_loading_tick: None,
             provider_selector: None,
             credential_dialog: None,
             totp_dialog: None,
@@ -383,13 +392,13 @@ impl App {
                                         self.device_flow_loading = None;
                                         self.state.loading_line = None;
                                         self.state.messages.push(
-                                            "Device flow authentication cancelled.".to_string(),
+                                            DisplayMessage::info("Device flow authentication cancelled."),
                                         );
                                     } else {
                                         self.fetch_loading = None;
                                         self.state.loading_line = None;
                                         self.state.messages.push(
-                                            "Model fetch cancelled.".to_string(),
+                                            DisplayMessage::info("Model fetch cancelled."),
                                         );
                                     }
                                     // Consume the Esc so it doesn't propagate
@@ -472,6 +481,48 @@ impl App {
                                         Some(Action::Noop)
                                     }
                                     _ => Some(Action::Noop), // swallow all other keys
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        // If the secrets dialog is open, handle navigation or close
+                        else if self.show_secrets_dialog {
+                            if let Event::Key(key) = &event {
+                                match key.code {
+                                    crossterm::event::KeyCode::Esc
+                                    | crossterm::event::KeyCode::Char('q') => {
+                                        self.show_secrets_dialog = false;
+                                        Some(Action::Noop)
+                                    }
+                                    crossterm::event::KeyCode::Char('j')
+                                    | crossterm::event::KeyCode::Down => {
+                                        let creds = self.state.secrets_manager.list_all_entries();
+                                        let max = creds.len().saturating_sub(1);
+                                        if self.secrets_scroll < max {
+                                            self.secrets_scroll += 1;
+                                        }
+                                        Some(Action::Noop)
+                                    }
+                                    crossterm::event::KeyCode::Char('k')
+                                    | crossterm::event::KeyCode::Up => {
+                                        self.secrets_scroll = self.secrets_scroll.saturating_sub(1);
+                                        Some(Action::Noop)
+                                    }
+                                    crossterm::event::KeyCode::Enter => {
+                                        let creds = self.state.secrets_manager.list_all_entries();
+                                        if let Some((name, entry)) = creds.get(self.secrets_scroll) {
+                                            self.show_secrets_dialog = false;
+                                            Some(Action::ShowCredentialDialog {
+                                                name: name.clone(),
+                                                disabled: entry.disabled,
+                                                policy: entry.policy.badge().to_string(),
+                                            })
+                                        } else {
+                                            Some(Action::Noop)
+                                        }
+                                    }
+                                    _ => Some(Action::Noop), // swallow
                                 }
                             } else {
                                 None
@@ -587,31 +638,31 @@ impl App {
 
                     match status {
                         "model_configured" => {
-                            self.state.messages.push(format!("🔧 Model: {}", detail));
+                            self.state.messages.push(DisplayMessage::info(format!("Model: {}", detail)));
                         }
                         "credentials_loaded" => {
-                            self.state.messages.push(format!("🔑 {}", detail));
+                            self.state.messages.push(DisplayMessage::info(detail));
                         }
                         "credentials_missing" => {
                             self.state.gateway_status = GatewayStatus::ModelError;
-                            self.state.messages.push(format!("⚠ {}", detail));
+                            self.state.messages.push(DisplayMessage::warning(detail));
                         }
                         "model_connecting" => {
-                            self.state.messages.push(format!("⏳ {}", detail));
+                            self.state.messages.push(DisplayMessage::info(detail));
                         }
                         "model_ready" => {
                             self.state.gateway_status = GatewayStatus::ModelReady;
-                            self.state.messages.push(format!("✅ {}", detail));
+                            self.state.messages.push(DisplayMessage::success(detail));
                         }
                         "model_error" => {
                             self.state.gateway_status = GatewayStatus::ModelError;
-                            self.state.messages.push(format!("❌ {}", detail));
+                            self.state.messages.push(DisplayMessage::error(detail));
                         }
                         "no_model" => {
-                            self.state.messages.push(format!("⚠ {}", detail));
+                            self.state.messages.push(DisplayMessage::warning(detail));
                         }
                         _ => {
-                            self.state.messages.push(format!("📡 [{}] {}", status, detail));
+                            self.state.messages.push(DisplayMessage::system(format!("[{}] {}", status, detail)));
                         }
                     }
                     return Ok(Some(Action::Update));
@@ -626,6 +677,25 @@ impl App {
                     }
                 });
 
+                // ── Handle error frames from the gateway ─────────────
+                let is_error_frame = frame_type == Some("error");
+                let error_message = if is_error_frame {
+                    parsed
+                        .as_ref()
+                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                        .map(String::from)
+                } else {
+                    None
+                };
+
+                if is_error_frame {
+                    self.chat_loading_tick = None;
+                    self.state.loading_line = None;
+                    let msg = error_message.unwrap_or_else(|| "Unknown gateway error".to_string());
+                    self.state.messages.push(DisplayMessage::error(msg));
+                    return Ok(Some(Action::Update));
+                }
+
                 // Route gateway messages to hatching during the exchange
                 if self.showing_hatching {
                     if let Some(content) = payload {
@@ -639,13 +709,28 @@ impl App {
 
                 // Normal (non-hatching) messages pane display
                 let display = payload.as_deref().unwrap_or(text);
-                self.state.messages.push(format!("◀ {}", display));
+
+                // Clear chat loading spinner
+                self.chat_loading_tick = None;
+                self.state.loading_line = None;
+
+                // Split multi-line responses into separate messages
+                let lines: Vec<&str> = display.lines().collect();
+                if lines.len() <= 1 {
+                    self.state.messages.push(DisplayMessage::assistant(display));
+                } else {
+                    for line in &lines {
+                        self.state.messages.push(DisplayMessage::assistant(*line));
+                    }
+                }
                 // Auto-scroll
                 return Ok(Some(Action::Update));
             }
             Action::GatewayDisconnected(reason) => {
                 self.state.gateway_status = GatewayStatus::Disconnected;
-                self.state.messages.push(format!("Gateway disconnected: {}", reason));
+                self.chat_loading_tick = None;
+                self.state.loading_line = None;
+                self.state.messages.push(DisplayMessage::warning(format!("Gateway disconnected: {}", reason)));
                 self.ws_sink = None;
                 self.reader_task = None;
                 return Ok(Some(Action::Update));
@@ -684,6 +769,11 @@ impl App {
                 self.show_skills_dialog = !self.show_skills_dialog;
                 return Ok(None);
             }
+            Action::ShowSecrets => {
+                self.show_secrets_dialog = !self.show_secrets_dialog;
+                self.secrets_scroll = 0;
+                return Ok(None);
+            }
             Action::ShowProviderSelector => {
                 self.open_provider_selector();
                 return Ok(None);
@@ -703,9 +793,9 @@ impl App {
                     model_cfg.base_url = Some(url.to_string());
                 }
                 if let Err(e) = self.state.config.save(None) {
-                    self.state.messages.push(format!("Failed to save config: {}", e));
+                    self.state.messages.push(DisplayMessage::error(format!("Failed to save config: {}", e)));
                 } else {
-                    self.state.messages.push(format!("Provider set to {}.", provider));
+                    self.state.messages.push(DisplayMessage::success(format!("Provider set to {}.", provider)));
                 }
                 // Check auth method and proceed accordingly
                 let def = providers::provider_by_id(&provider);
@@ -717,10 +807,10 @@ impl App {
                         if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
                             match self.state.secrets_manager.get_secret(secret_key, true) {
                                 Ok(Some(_)) => {
-                                    self.state.messages.push(format!(
-                                        "✓ Access token for {} is already stored.",
+                                    self.state.messages.push(DisplayMessage::success(format!(
+                                        "Access token for {} is already stored.",
                                         providers::display_name_for_provider(&provider),
-                                    ));
+                                    )));
                                     return Ok(Some(Action::FetchModels(provider)));
                                 }
                                 _ => {
@@ -733,10 +823,10 @@ impl App {
                         if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
                             match self.state.secrets_manager.get_secret(secret_key, true) {
                                 Ok(Some(_)) => {
-                                    self.state.messages.push(format!(
-                                        "✓ API key for {} is already stored.",
+                                    self.state.messages.push(DisplayMessage::success(format!(
+                                        "API key for {} is already stored.",
                                         providers::display_name_for_provider(&provider),
-                                    ));
+                                    )));
                                     return Ok(Some(Action::FetchModels(provider)));
                                 }
                                 _ => {
@@ -746,10 +836,10 @@ impl App {
                         }
                     }
                     providers::AuthMethod::None => {
-                        self.state.messages.push(format!(
+                        self.state.messages.push(DisplayMessage::info(format!(
                             "{} does not require authentication.",
                             providers::display_name_for_provider(&provider),
-                        ));
+                        )));
                         return Ok(Some(Action::FetchModels(provider)));
                     }
                 }
@@ -768,7 +858,7 @@ impl App {
             Action::FetchModelsFailed(msg) => {
                 self.fetch_loading = None;
                 self.state.loading_line = None;
-                self.state.messages.push(msg.clone());
+                self.state.messages.push(DisplayMessage::error(msg));
                 return Ok(Some(Action::Update));
             }
             Action::ShowModelSelector { provider, models } => {
@@ -782,15 +872,15 @@ impl App {
                 return Ok(None);
             }
             Action::DeviceFlowCodeReady { url, code } => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::info(
                     "Open this URL in your browser:",
                 ));
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::info(format!(
                     "  ➜  {}", url,
-                ));
-                self.state.messages.push(format!(
+                )));
+                self.state.messages.push(DisplayMessage::info(format!(
                     "Then enter this code:  {}", code,
-                ));
+                )));
                 return Ok(Some(Action::Update));
             }
             Action::DeviceFlowAuthenticated { provider, token } => {
@@ -801,16 +891,16 @@ impl App {
                 let display = providers::display_name_for_provider(provider).to_string();
                 match self.state.secrets_manager.store_secret(secret_key, token) {
                     Ok(()) => {
-                        self.state.messages.push(format!(
-                            "✓ {} authenticated successfully. Token stored.",
+                        self.state.messages.push(DisplayMessage::success(format!(
+                            "{} authenticated successfully. Token stored.",
                             display,
-                        ));
+                        )));
                     }
                     Err(e) => {
-                        self.state.messages.push(format!(
+                        self.state.messages.push(DisplayMessage::error(format!(
                             "Failed to store token: {}. Token set for this session only.",
                             e,
-                        ));
+                        )));
                     }
                 }
                 // Proceed to model selection
@@ -819,7 +909,7 @@ impl App {
             Action::DeviceFlowFailed(msg) => {
                 self.device_flow_loading = None;
                 self.state.loading_line = None;
-                self.state.messages.push(msg.clone());
+                self.state.messages.push(DisplayMessage::error(msg));
                 return Ok(Some(Action::Update));
             }
             Action::ShowCredentialDialog { name, disabled, .. } => {
@@ -856,9 +946,9 @@ impl App {
                             });
                         }
                         Err(e) => {
-                            self.state.messages.push(format!(
+                            self.state.messages.push(DisplayMessage::error(format!(
                                 "Failed to set up 2FA: {}", e,
-                            ));
+                            )));
                         }
                     }
                 }
@@ -884,7 +974,7 @@ impl App {
                 // Save the generated identity as SOUL.md
                 let content = soul_content.clone();
                 if let Err(e) = self.state.soul_manager.set_content(content) {
-                    self.state.messages.push(format!("Failed to save SOUL.md: {}", e));
+                    self.state.messages.push(DisplayMessage::error(format!("Failed to save SOUL.md: {}", e)));
                 }
                 self.showing_hatching = false;
                 self.hatching_page = None;
@@ -943,24 +1033,24 @@ impl App {
                 CommandAction::ClearMessages => {
                     self.state.messages.clear();
                     for msg in response.messages {
-                        self.state.messages.push(msg);
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                 }
                 CommandAction::GatewayStart => {
                     for msg in response.messages {
-                        self.state.messages.push(msg);
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                     return Ok(Some(Action::ReconnectGateway));
                 }
                 CommandAction::GatewayStop => {
                     for msg in response.messages {
-                        self.state.messages.push(msg);
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                     return Ok(Some(Action::DisconnectGateway));
                 }
                 CommandAction::GatewayRestart => {
                     for msg in response.messages {
-                        self.state.messages.push(msg);
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                     return Ok(Some(Action::RestartGateway));
                 }
@@ -971,21 +1061,21 @@ impl App {
                         .gateway_url
                         .as_deref()
                         .unwrap_or("(none)");
-                    self.state.messages.push(format!(
+                    self.state.messages.push(DisplayMessage::system(format!(
                         "Gateway: {}  Status: {}",
                         url_display,
                         self.state.gateway_status.label()
-                    ));
+                    )));
                 }
                 CommandAction::SetProvider(ref provider) => {
                     for msg in &response.messages {
-                        self.state.messages.push(msg.clone());
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                     return Ok(Some(Action::SetProvider(provider.clone())));
                 }
                 CommandAction::SetModel(ref model) => {
                     for msg in &response.messages {
-                        self.state.messages.push(msg.clone());
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                     let model_cfg = self.state.config.model.get_or_insert_with(|| {
                         crate::config::ModelProvider {
@@ -996,9 +1086,9 @@ impl App {
                     });
                     model_cfg.model = Some(model.clone());
                     if let Err(e) = self.state.config.save(None) {
-                        self.state.messages.push(format!("Failed to save config: {}", e));
+                        self.state.messages.push(DisplayMessage::error(format!("Failed to save config: {}", e)));
                     } else {
-                        self.state.messages.push(format!("Model set to {}.", model));
+                        self.state.messages.push(DisplayMessage::success(format!("Model set to {}.", model)));
                     }
                     // Restart the gateway so it picks up the new model.
                     return Ok(Some(Action::RestartGateway));
@@ -1006,12 +1096,15 @@ impl App {
                 CommandAction::ShowSkills => {
                     return Ok(Some(Action::ShowSkills));
                 }
+                CommandAction::ShowSecrets => {
+                    return Ok(Some(Action::ShowSecrets));
+                }
                 CommandAction::ShowProviderSelector => {
                     return Ok(Some(Action::ShowProviderSelector));
                 }
                 CommandAction::None => {
                     for msg in response.messages {
-                        self.state.messages.push(msg);
+                        self.state.messages.push(DisplayMessage::info(msg));
                     }
                 }
             }
@@ -1021,7 +1114,7 @@ impl App {
             // It's a plain prompt — wrap it in a chat request envelope so
             // the gateway recognises it as a model call rather than echoing
             // the raw text back.
-            self.state.messages.push(format!("▶ {}", text));
+            self.state.messages.push(DisplayMessage::user(&text));
             if matches!(self.state.gateway_status, GatewayStatus::Connected | GatewayStatus::ModelReady)
                 && self.ws_sink.is_some()
             {
@@ -1030,11 +1123,16 @@ impl App {
                     "messages": [{"role": "user", "content": text}],
                 })
                 .to_string();
+                self.chat_loading_tick = Some(0);
+                let spinner = SPINNER_FRAMES[0];
+                self.state.loading_line = Some(format!(
+                    "  {} Waiting for model response\u{2026}", spinner,
+                ));
                 return Ok(Some(Action::SendToGateway(chat_json)));
             }
             self.state
                 .messages
-                .push("(Gateway not connected — use /gateway start)".to_string());
+                .push(DisplayMessage::warning("Gateway not connected — use /gateway start"));
             Ok(Some(Action::Update))
         }
     }
@@ -1057,7 +1155,7 @@ impl App {
         if self.ws_sink.is_some() {
             self.state
                 .messages
-                .push("Already connected to gateway.".to_string());
+                .push(DisplayMessage::info("Already connected to gateway."));
             return;
         }
 
@@ -1066,23 +1164,23 @@ impl App {
         // Start the daemon if it isn't running yet.
         match daemon::status(&self.state.config.settings_dir) {
             daemon::DaemonStatus::Running { pid } => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::info(format!(
                     "Gateway daemon already running (PID {}).", pid,
-                ));
+                )));
             }
             _ => {
                 // Save config first so the daemon reads current values.
                 if let Err(e) = self.state.config.save(None) {
-                    self.state.messages.push(format!(
+                    self.state.messages.push(DisplayMessage::warning(format!(
                         "Warning: could not save config: {}", e,
-                    ));
+                    )));
                 }
 
                 let api_key = self.extract_model_api_key();
 
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::info(format!(
                     "Starting gateway daemon on {}…", url,
-                ));
+                )));
                 match daemon::start(
                     &self.state.config.settings_dir,
                     port,
@@ -1091,15 +1189,15 @@ impl App {
                     api_key.as_deref(),
                 ) {
                     Ok(pid) => {
-                        self.state.messages.push(format!(
+                        self.state.messages.push(DisplayMessage::success(format!(
                             "Gateway daemon started (PID {}).", pid,
-                        ));
+                        )));
                     }
                     Err(e) => {
                         self.state.gateway_status = GatewayStatus::Error;
-                        self.state.messages.push(format!(
+                        self.state.messages.push(DisplayMessage::error(format!(
                             "Failed to start gateway: {}", e,
-                        ));
+                        )));
                         return;
                     }
                 }
@@ -1123,7 +1221,7 @@ impl App {
                 self.state.gateway_status = GatewayStatus::Connected;
                 self.state
                     .messages
-                    .push(format!("Connected to gateway {}", url));
+                    .push(DisplayMessage::success(format!("Connected to gateway {}", url)));
 
                 // Spawn a background task that reads from the gateway and
                 // forwards messages into the TUI event loop via action_tx.
@@ -1136,7 +1234,7 @@ impl App {
                 self.state.gateway_status = GatewayStatus::Error;
                 self.state
                     .messages
-                    .push(format!("Gateway connection failed: {}", err));
+                    .push(DisplayMessage::error(format!("Gateway connection failed: {}", err)));
             }
         }
     }
@@ -1193,7 +1291,9 @@ impl App {
             match sink.send(Message::Text(text.into())).await {
                 Ok(()) => {}
                 Err(err) => {
-                    self.state.messages.push(format!("Send failed: {}", err));
+                    self.chat_loading_tick = None;
+                    self.state.loading_line = None;
+                    self.state.messages.push(DisplayMessage::error(format!("Send failed: {}", err)));
                     self.state.gateway_status = GatewayStatus::Error;
                     self.ws_sink = None;
                 }
@@ -1201,7 +1301,7 @@ impl App {
         } else {
             self.state
                 .messages
-                .push("Cannot send: gateway not connected.".to_string());
+                .push(DisplayMessage::warning("Cannot send: gateway not connected."));
         }
     }
 
@@ -1223,22 +1323,22 @@ impl App {
         // Stop the daemon process.
         let daemon_stopped = match daemon::stop(&self.state.config.settings_dir) {
             Ok(daemon::StopResult::Stopped { pid }) => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::info(format!(
                     "Gateway daemon stopped (was PID {}).", pid,
-                ));
+                )));
                 true
             }
             Ok(daemon::StopResult::WasStale { pid }) => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::warning(format!(
                     "Cleaned up stale PID file (PID {}).", pid,
-                ));
+                )));
                 false
             }
             Ok(daemon::StopResult::WasNotRunning) => false,
             Err(e) => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::warning(format!(
                     "Warning: could not stop daemon: {}", e,
-                ));
+                )));
                 false
             }
         };
@@ -1246,12 +1346,12 @@ impl App {
         if had_connection || daemon_stopped {
             self.state.gateway_status = GatewayStatus::Disconnected;
             if !daemon_stopped {
-                self.state.messages.push("Disconnected from gateway.".to_string());
+                self.state.messages.push(DisplayMessage::info("Disconnected from gateway."));
             }
         } else {
             self.state
                 .messages
-                .push("Gateway is not running.".to_string());
+                .push(DisplayMessage::info("Gateway is not running."));
         }
     }
 
@@ -1298,7 +1398,7 @@ impl App {
         tui.draw(|frame| {
             let area = frame.area();
 
-            let ps = PaneState {
+            let mut ps = PaneState {
                 config: &self.state.config,
                 secrets_manager: &mut self.state.secrets_manager,
                 skill_manager: &mut self.state.skill_manager,
@@ -1334,6 +1434,13 @@ impl App {
             // Skills dialog overlay
             if self.show_skills_dialog {
                 Self::draw_skills_dialog(frame, area, &ps);
+            }
+
+            // Secrets dialog overlay
+            if self.show_secrets_dialog {
+                Self::draw_secrets_dialog(
+                    frame, area, &mut ps, self.secrets_scroll,
+                );
             }
 
             // API key dialog overlay
@@ -1449,6 +1556,157 @@ impl App {
         frame.render_widget(list, dialog_area);
     }
 
+    /// Draw a centered secrets vault dialog overlay.
+    fn draw_secrets_dialog(
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        state: &mut PaneState<'_>,
+        scroll_offset: usize,
+    ) {
+        use crate::secrets::AccessPolicy;
+        use crate::theme::tui_palette as tp;
+        use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
+
+        let creds = state.secrets_manager.list_all_entries();
+        let agent_access = state.secrets_manager.has_agent_access();
+        let has_totp = state.secrets_manager.has_totp();
+
+        // Size: 70 cols or 90% width, height = creds + header lines + border
+        let dialog_w = 70.min(area.width.saturating_sub(4));
+        let dialog_h = ((creds.len() as u16) + 8).min(area.height.saturating_sub(4)).max(8);
+        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let mut items: Vec<ListItem> = Vec::new();
+
+        // ── Header: agent-access status ─────────────────────────────
+        let (access_label, access_style) = if agent_access {
+            ("Enabled", Style::default().fg(tp::SUCCESS))
+        } else {
+            ("Disabled", Style::default().fg(tp::WARN))
+        };
+
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(" Agent Access: ", Style::default().fg(tp::TEXT_DIM)),
+            Span::styled(access_label, access_style),
+            Span::styled(
+                format!("  │  {} cred{}", creds.len(), if creds.len() == 1 { "" } else { "s" }),
+                Style::default().fg(tp::TEXT_DIM),
+            ),
+            Span::styled("  │  2FA: ", Style::default().fg(tp::TEXT_DIM)),
+            if has_totp {
+                Span::styled("On", Style::default().fg(tp::SUCCESS))
+            } else {
+                Span::styled("Off", Style::default().fg(tp::MUTED))
+            },
+        ])));
+
+        items.push(ListItem::new(""));
+
+        // ── Credential rows ─────────────────────────────────────────
+        if creds.is_empty() {
+            items.push(ListItem::new(Span::styled(
+                "  No credentials stored.",
+                Style::default().fg(tp::MUTED).add_modifier(Modifier::ITALIC),
+            )));
+        } else {
+            for (i, (name, entry)) in creds.iter().enumerate() {
+                let highlight = i == scroll_offset;
+                let is_disabled = entry.disabled;
+
+                let row_style = if highlight {
+                    tp::selected()
+                } else if is_disabled {
+                    Style::default().add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
+                } else {
+                    Style::default()
+                };
+
+                let icon = entry.kind.icon();
+                let kind_label = format!(" {:10} ", entry.kind.to_string());
+
+                let badge = if is_disabled {
+                    Span::styled(
+                        " OFF ",
+                        Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::MUTED),
+                    )
+                } else {
+                    let (label, color) = match &entry.policy {
+                        AccessPolicy::Always => (" OPEN ", tp::SUCCESS),
+                        AccessPolicy::WithApproval => (" ASK ", tp::WARN),
+                        AccessPolicy::WithAuth => (" AUTH ", tp::ERROR),
+                        AccessPolicy::SkillOnly(skills) if skills.is_empty() => (" LOCK ", tp::MUTED),
+                        AccessPolicy::SkillOnly(_) => (" SKILL ", tp::INFO),
+                    };
+                    Span::styled(label, Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(color))
+                };
+
+                let desc = entry.description.as_deref().unwrap_or("");
+                let detail = if desc.is_empty() {
+                    format!(" {}", name)
+                } else {
+                    format!(" {} — {}", name, desc)
+                };
+
+                let label_style = if is_disabled {
+                    Style::default().fg(tp::MUTED).add_modifier(Modifier::CROSSED_OUT).patch(row_style)
+                } else {
+                    Style::default().fg(tp::TEXT).patch(row_style)
+                };
+                let kind_style = if is_disabled {
+                    Style::default().fg(tp::MUTED).patch(row_style)
+                } else {
+                    Style::default().fg(tp::ACCENT_BRIGHT).patch(row_style)
+                };
+
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", icon), row_style),
+                    Span::styled(kind_label, kind_style),
+                    badge,
+                    Span::styled(" ", row_style),
+                    Span::styled(&entry.label, label_style),
+                    Span::styled(detail, Style::default().fg(tp::TEXT_DIM).patch(row_style)),
+                ])));
+            }
+        }
+
+        items.push(ListItem::new(""));
+
+        // ── Legend ───────────────────────────────────────────────────
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(" OPEN ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::SUCCESS)),
+            Span::styled(" anytime ", Style::default().fg(tp::TEXT_DIM)),
+            Span::styled(" ASK ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::WARN)),
+            Span::styled(" per-use ", Style::default().fg(tp::TEXT_DIM)),
+            Span::styled(" AUTH ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::ERROR)),
+            Span::styled(" re-auth ", Style::default().fg(tp::TEXT_DIM)),
+            Span::styled(" SKILL ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::INFO)),
+            Span::styled(" skill-gated", Style::default().fg(tp::TEXT_DIM)),
+        ])));
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(Span::styled(" Secrets Vault ", tp::title_focused()))
+                    .title_bottom(
+                        Line::from(Span::styled(
+                            " j/k↕  Enter→manage  Esc→close ",
+                            Style::default().fg(tp::MUTED),
+                        ))
+                        .right_aligned(),
+                    )
+                    .borders(Borders::ALL)
+                    .border_style(tp::focused_border())
+                    .border_type(ratatui::widgets::BorderType::Rounded),
+            )
+            .style(Style::default().fg(tp::TEXT));
+
+        frame.render_widget(list, dialog_area);
+    }
+
     // ── API-key dialog ──────────────────────────────────────────────────────
 
     /// Open the API-key input dialog for the given provider.
@@ -1458,10 +1716,10 @@ impl App {
             None => return None, // shouldn't happen, but just in case
         };
         let display = providers::display_name_for_provider(&provider).to_string();
-        self.state.messages.push(format!(
+        self.state.messages.push(DisplayMessage::warning(format!(
             "No API key found for {}. Please enter one below.",
             display,
-        ));
+        )));
         self.api_key_dialog = Some(ApiKeyDialogState {
             provider,
             display,
@@ -1486,16 +1744,15 @@ impl App {
                 KeyCode::Esc => {
                     self.state
                         .messages
-                        .push("API key entry cancelled.".to_string());
+                        .push(DisplayMessage::info("API key entry cancelled."));
                     // dialog is already taken — dropped
                     return Action::Noop;
                 }
                 KeyCode::Enter => {
                     if dialog.input.is_empty() {
-                        self.state.messages.push(
-                            "No key entered — you can add one later with /provider."
-                                .to_string(),
-                        );
+                        self.state.messages.push(DisplayMessage::info(
+                            "No key entered — you can add one later with /provider.",
+                        ));
                         return Action::Noop;
                     }
                     // Move to confirmation phase
@@ -1527,10 +1784,10 @@ impl App {
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     // Use the key for this session but don't store
-                    self.state.messages.push(format!(
+                    self.state.messages.push(DisplayMessage::success(format!(
                         "✓ API key for {} set for this session (not stored).",
                         dialog.display,
-                    ));
+                    )));
                     // Proceed to model selection
                     return Action::FetchModels(dialog.provider.clone());
                 }
@@ -1554,16 +1811,16 @@ impl App {
 
         match self.state.secrets_manager.store_secret(&secret_key, &key) {
             Ok(()) => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::success(format!(
                     "✓ API key for {} stored securely.",
                     display,
-                ));
+                )));
             }
             Err(e) => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::error(format!(
                     "Failed to store API key: {}. Key is set for this session only.",
                     e,
-                ));
+                )));
             }
         }
         // After storing the key, proceed to model selection
@@ -1678,10 +1935,10 @@ impl App {
     /// via the action channel.  Shows an inline loading line in the meantime.
     fn spawn_fetch_models(&mut self, provider: String) {
         let display = providers::display_name_for_provider(&provider).to_string();
-        self.state.messages.push(format!(
+        self.state.messages.push(DisplayMessage::info(format!(
             "Fetching available models for {}…",
             display,
-        ));
+        )));
 
         // Show the inline loading line under the chat log
         let spinner = SPINNER_FRAMES[0];
@@ -1746,7 +2003,7 @@ impl App {
         let def = match providers::provider_by_id(&provider) {
             Some(d) => d,
             None => {
-                self.state.messages.push(format!("Unknown provider: {}", provider));
+                self.state.messages.push(DisplayMessage::error(format!("Unknown provider: {}", provider)));
                 return;
             }
         };
@@ -1754,19 +2011,19 @@ impl App {
         let device_config = match def.device_flow {
             Some(cfg) => cfg,
             None => {
-                self.state.messages.push(format!(
+                self.state.messages.push(DisplayMessage::warning(format!(
                     "{} does not support device flow authentication.",
                     def.display,
-                ));
+                )));
                 return;
             }
         };
 
         let display = def.display.to_string();
-        self.state.messages.push(format!(
+        self.state.messages.push(DisplayMessage::info(format!(
             "Authenticating with {}…",
             display,
-        ));
+        )));
 
         // Show the inline loading line
         let spinner = SPINNER_FRAMES[0];
@@ -1863,7 +2120,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state
                     .messages
-                    .push("Model selection cancelled.".to_string());
+                    .push(DisplayMessage::info("Model selection cancelled."));
                 return Action::Noop;
             }
             KeyCode::Enter => {
@@ -1881,12 +2138,12 @@ impl App {
                     if let Err(e) = self.state.config.save(None) {
                         self.state
                             .messages
-                            .push(format!("Failed to save config: {}", e));
+                            .push(DisplayMessage::error(format!("Failed to save config: {}", e)));
                     } else {
-                        self.state.messages.push(format!(
+                        self.state.messages.push(DisplayMessage::success(format!(
                             "✓ Model set to {}.",
                             model_name,
-                        ));
+                        )));
                     }
                 }
                 // Restart the gateway so it picks up the new model.
@@ -2050,17 +2307,17 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state
                     .messages
-                    .push("Provider selection cancelled.".to_string());
+                    .push(DisplayMessage::info("Provider selection cancelled."));
                 return Action::Noop;
             }
             KeyCode::Enter => {
                 if let Some((id, display)) =
                     sel.providers.get(sel.selected).cloned()
                 {
-                    self.state.messages.push(format!(
+                    self.state.messages.push(DisplayMessage::info(format!(
                         "Switching provider to {}\u{2026}",
                         display,
-                    ));
+                    )));
                     return Action::SetProvider(id);
                 }
                 return Action::Noop;
@@ -2253,9 +2510,9 @@ impl App {
                                 });
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to read secret: {}", e,
-                                ));
+                                )));
                             }
                         }
                         return Action::Noop;
@@ -2275,21 +2532,21 @@ impl App {
                                 };
                                 match Self::copy_to_clipboard(&text) {
                                     Ok(()) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::success(format!(
                                             "Credential '{}' copied to clipboard.", dlg.name,
-                                        ));
+                                        )));
                                     }
                                     Err(e) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::error(format!(
                                             "Failed to copy: {}", e,
-                                        ));
+                                        )));
                                     }
                                 }
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to read secret: {}", e,
-                                ));
+                                )));
                             }
                         }
                         return Action::Update;
@@ -2314,14 +2571,14 @@ impl App {
                         match self.state.secrets_manager.set_credential_disabled(&dlg.name, new_state) {
                             Ok(()) => {
                                 let verb = if new_state { "disabled" } else { "enabled" };
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::success(format!(
                                     "Credential '{}' {}.", dlg.name, verb,
-                                ));
+                                )));
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to update credential: {}", e,
-                                ));
+                                )));
                             }
                         }
                     }
@@ -2339,14 +2596,14 @@ impl App {
                         }
                         match self.state.secrets_manager.delete_credential(&dlg.name) {
                             Ok(()) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::success(format!(
                                     "Credential '{}' deleted.", dlg.name,
-                                ));
+                                )));
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to delete credential: {}", e,
-                                ));
+                                )));
                             }
                         }
                     }
@@ -2510,14 +2767,14 @@ impl App {
                                     crate::secrets::AccessPolicy::Always,
                                 ) {
                                     Ok(()) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::success(format!(
                                             "Policy for '{}' set to OPEN.", picker.cred_name,
-                                        ));
+                                        )));
                                     }
                                     Err(e) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::error(format!(
                                             "Failed to set policy: {}", e,
-                                        ));
+                                        )));
                                     }
                                 }
                                 return Action::Update;
@@ -2528,14 +2785,14 @@ impl App {
                                     crate::secrets::AccessPolicy::WithApproval,
                                 ) {
                                     Ok(()) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::success(format!(
                                             "Policy for '{}' set to ASK.", picker.cred_name,
-                                        ));
+                                        )));
                                     }
                                     Err(e) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::error(format!(
                                             "Failed to set policy: {}", e,
-                                        ));
+                                        )));
                                     }
                                 }
                                 return Action::Update;
@@ -2546,14 +2803,14 @@ impl App {
                                     crate::secrets::AccessPolicy::WithAuth,
                                 ) {
                                     Ok(()) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::success(format!(
                                             "Policy for '{}' set to AUTH.", picker.cred_name,
-                                        ));
+                                        )));
                                     }
                                     Err(e) => {
-                                        self.state.messages.push(format!(
+                                        self.state.messages.push(DisplayMessage::error(format!(
                                             "Failed to set policy: {}", e,
-                                        ));
+                                        )));
                                     }
                                 }
                                 return Action::Update;
@@ -2605,22 +2862,22 @@ impl App {
                         ) {
                             Ok(()) => {
                                 if skills.is_empty() {
-                                    self.state.messages.push(format!(
+                                    self.state.messages.push(DisplayMessage::success(format!(
                                         "Policy for '{}' set to SKILL (locked — no skills).",
                                         picker.cred_name,
-                                    ));
+                                    )));
                                 } else {
-                                    self.state.messages.push(format!(
+                                    self.state.messages.push(DisplayMessage::success(format!(
                                         "Policy for '{}' set to SKILL ({}).",
                                         picker.cred_name,
                                         skills.join(", "),
-                                    ));
+                                    )));
                                 }
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to set policy: {}", e,
-                                ));
+                                )));
                             }
                         }
                         return Action::Update;
@@ -2801,7 +3058,7 @@ impl App {
                                     self.state.config.totp_enabled = true;
                                     let _ = self.state.config.save(None);
                                     self.state.messages.push(
-                                        "✓ 2FA configured successfully.".to_string(),
+                                        DisplayMessage::success("✓ 2FA configured successfully."),
                                     );
                                     self.totp_dialog = Some(TotpDialogState {
                                         phase: TotpDialogPhase::Verified,
@@ -2819,9 +3076,9 @@ impl App {
                                     return Action::Noop;
                                 }
                                 Err(e) => {
-                                    self.state.messages.push(format!(
+                                    self.state.messages.push(DisplayMessage::error(format!(
                                         "TOTP verification error: {}", e,
-                                    ));
+                                    )));
                                     let _ = self.state.secrets_manager.remove_totp();
                                     return Action::Noop;
                                 }
@@ -2849,13 +3106,13 @@ impl App {
                                 self.state.config.totp_enabled = false;
                                 let _ = self.state.config.save(None);
                                 self.state.messages.push(
-                                    "2FA has been removed.".to_string(),
+                                    DisplayMessage::info("2FA has been removed."),
                                 );
                             }
                             Err(e) => {
-                                self.state.messages.push(format!(
+                                self.state.messages.push(DisplayMessage::error(format!(
                                     "Failed to remove 2FA: {}", e,
-                                ));
+                                )));
                             }
                         }
                         return Action::Noop;

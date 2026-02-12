@@ -46,13 +46,86 @@ impl GatewayStatus {
     }
 }
 
+// ── Message types ───────────────────────────────────────────────────────────
+
+/// Role / category of a chat-pane message.
+///
+/// Determines the icon and colour used when rendering the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRole {
+    /// User-submitted prompt (▶)
+    User,
+    /// Model / assistant reply (◀)
+    Assistant,
+    /// Neutral informational (ℹ)
+    Info,
+    /// Positive confirmation (✅)
+    Success,
+    /// Non-critical warning (⚠)
+    Warning,
+    /// Hard error (❌)
+    Error,
+    /// Generic system status (📡)
+    System,
+}
+
+impl MessageRole {
+    /// Leading icon character for display.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::User => "▶",
+            Self::Assistant => "◀",
+            Self::Info => "ℹ",
+            Self::Success => "✅",
+            Self::Warning => "⚠",
+            Self::Error => "❌",
+            Self::System => "📡",
+        }
+    }
+}
+
+/// A single message in the chat / log pane.
+#[derive(Debug, Clone)]
+pub struct DisplayMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+
+impl DisplayMessage {
+    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+        Self { role, content: content.into() }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::User, content)
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Assistant, content)
+    }
+    pub fn info(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Info, content)
+    }
+    pub fn success(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Success, content)
+    }
+    pub fn warning(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Warning, content)
+    }
+    pub fn error(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Error, content)
+    }
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::System, content)
+    }
+}
+
 /// Shared state passed to every pane during update and draw.
 pub struct PaneState<'a> {
     pub config: &'a crate::config::Config,
     pub secrets_manager: &'a mut crate::secrets::SecretsManager,
     pub skill_manager: &'a mut crate::skills::SkillManager,
     pub soul_manager: &'a crate::soul::SoulManager,
-    pub messages: &'a mut Vec<String>,
+    pub messages: &'a mut Vec<DisplayMessage>,
     pub input_mode: InputMode,
     pub gateway_status: GatewayStatus,
     /// Animated loading line shown at the bottom of the messages list.

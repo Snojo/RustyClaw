@@ -22,6 +22,8 @@ pub enum CommandAction {
     SetModel(String),
     /// Show skills dialog
     ShowSkills,
+    /// Show the secrets dialog
+    ShowSecrets,
     /// Show the provider selector dialog
     ShowProviderSelector,
 }
@@ -55,6 +57,7 @@ pub fn command_names() -> Vec<String> {
         "provider".into(),
         "model".into(),
         "skills".into(),
+        "secrets".into(),
         "quit".into(),
     ];
     for p in providers::provider_ids() {
@@ -101,6 +104,7 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 "  /provider <name>         - Change the AI provider".to_string(),
                 "  /model <name>            - Change the AI model".to_string(),
                 "  /skills                  - Show loaded skills".to_string(),
+                "  /secrets                 - Open the secrets vault".to_string(),
             ],
             action: CommandAction::None,
         },
@@ -174,6 +178,10 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
         "skills" => CommandResponse {
             messages: Vec::new(),
             action: CommandAction::ShowSkills,
+        },
+        "secrets" => CommandResponse {
+            messages: Vec::new(),
+            action: CommandAction::ShowSecrets,
         },
         "provider" => match parts.get(1) {
             Some(name) => {

@@ -40,6 +40,10 @@ pub enum Action {
     GatewayDisconnected(String),
     /// Toggle the skills dialog overlay
     ShowSkills,
+    /// Toggle the secrets dialog overlay
+    ShowSecrets,
+    /// Copy the currently selected message to clipboard
+    CopyMessage,
     /// Show the provider-selection dialog
     ShowProviderSelector,
     /// Set the active provider (triggers auth check + model fetch)

@@ -7,7 +7,6 @@ use crate::action::Action;
 use crate::pages::Page;
 use crate::panes::{
     messages::MessagesPane,
-    secrets_pane::SecretsPane,
     InputMode, Pane, PaneState,
 };
 use crate::tui::EventResponse;
@@ -16,7 +15,6 @@ pub struct Home {
     command_tx: Option<UnboundedSender<Action>>,
     panes: Vec<Box<dyn Pane>>,
     focused_pane_index: usize,
-    fullscreen_pane_index: Option<usize>,
 }
 
 impl Home {
@@ -28,10 +26,8 @@ impl Home {
             command_tx: None,
             panes: vec![
                 Box::new(MessagesPane::new(true, focused_border_style)),
-                Box::new(SecretsPane::new(false, focused_border_style)),
             ],
             focused_pane_index: 0,
-            fullscreen_pane_index: None,
         })
     }
 }
@@ -82,6 +78,9 @@ impl Page for Home {
             KeyCode::Char('f') => {
                 return Ok(Some(EventResponse::Stop(Action::ToggleFullScreen)));
             }
+            KeyCode::Char('c') => {
+                return Ok(Some(EventResponse::Stop(Action::CopyMessage)));
+            }
             _ => {}
         }
 
@@ -90,42 +89,19 @@ impl Page for Home {
 
     fn update(&mut self, action: Action, state: &mut PaneState<'_>) -> Result<Option<Action>> {
         match action {
-            Action::FocusNext => {
-                self.panes[self.focused_pane_index].update(Action::UnFocus, state)?;
-                self.focused_pane_index = (self.focused_pane_index + 1) % self.panes.len();
-                return self.panes[self.focused_pane_index].update(Action::Focus, state);
+            Action::FocusNext | Action::FocusPrev | Action::ToggleFullScreen => {
+                // Single pane — nothing to cycle or fullscreen.
             }
-            Action::FocusPrev => {
-                self.panes[self.focused_pane_index].update(Action::UnFocus, state)?;
-                self.focused_pane_index = self
-                    .focused_pane_index
-                    .checked_sub(1)
-                    .unwrap_or(self.panes.len() - 1);
-                return self.panes[self.focused_pane_index].update(Action::Focus, state);
-            }
-            Action::ToggleFullScreen => {
-                self.fullscreen_pane_index = match self.fullscreen_pane_index {
-                    Some(_) => None,
-                    None => Some(self.focused_pane_index),
-                };
-            }
-            Action::Tab(n) => {
-                let idx = (n as usize).saturating_sub(1);
-                if idx < self.panes.len() {
-                    self.panes[self.focused_pane_index].update(Action::UnFocus, state)?;
-                    self.focused_pane_index = idx;
-                    return self.panes[self.focused_pane_index].update(Action::Focus, state);
-                }
+            Action::Tab(_n) => {
+                // Single pane — ignore tab switching.
             }
             Action::Tick => {
-                // Broadcast Tick to *all* panes so unfocused ones can
-                // refresh their cached state (e.g. secrets list).
                 for pane in &mut self.panes {
                     pane.update(Action::Tick, state)?;
                 }
             }
             _ => {
-                // Forward action to focused pane
+                // Forward action to the (only) pane
                 if let Some(result) =
                     self.panes[self.focused_pane_index].update(action, state)?
                 {
@@ -137,34 +113,8 @@ impl Page for Home {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, state: &PaneState<'_>) -> Result<()> {
-        if let Some(fullscreen_idx) = self.fullscreen_pane_index {
-            self.panes[fullscreen_idx].draw(frame, area, state)?;
-        } else {
-            // Two-column layout: left = messages, right = stacked (skills, secrets, config)
-            let outer = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Fill(1), Constraint::Fill(1)])
-                .split(area);
-
-            // Left: messages pane takes full height
-            self.panes[0].draw(frame, outer[0], state)?;
-
-            // Right: stack the remaining panes vertically
-            let right_constraints: Vec<Constraint> = self.panes[1..]
-                .iter()
-                .map(|p| p.height_constraint())
-                .collect();
-
-            let right_panes = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(right_constraints)
-                .split(outer[1]);
-
-            for (i, pane) in self.panes[1..].iter_mut().enumerate() {
-                pane.draw(frame, right_panes[i], state)?;
-            }
-        }
-
+        // Single full-width messages pane
+        self.panes[0].draw(frame, area, state)?;
         Ok(())
     }
 }
