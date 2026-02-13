@@ -38,6 +38,9 @@ enum Commands {
     /// Interactive onboarding wizard — set up gateway, workspace, and skills
     Onboard(OnboardArgs),
 
+    /// Import an existing OpenClaw installation into RustyClaw
+    Import(ImportArgs),
+
     /// Interactive configuration wizard (models, gateway, skills)
     Configure,
 
@@ -90,6 +93,30 @@ struct SetupArgs {
     /// Remote gateway token (optional)
     #[arg(long, value_name = "TOKEN")]
     remote_token: Option<String>,
+}
+
+// ── Import ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// Path to the OpenClaw directory to import (default: ~/.openclaw)
+    #[arg(value_name = "PATH")]
+    source: Option<String>,
+    /// RustyClaw settings directory (default: ~/.rustyclaw)
+    #[arg(long, value_name = "DIR")]
+    target: Option<String>,
+    /// Overwrite existing files without prompting
+    #[arg(long)]
+    force: bool,
+    /// Skip credential import
+    #[arg(long)]
+    skip_credentials: bool,
+    /// Skip workspace import (SOUL.md, AGENTS.md, memory/, etc.)
+    #[arg(long)]
+    skip_workspace: bool,
+    /// Dry run — show what would be imported without making changes
+    #[arg(long)]
+    dry_run: bool,
 }
 
 // ── Onboard ─────────────────────────────────────────────────────────────────
@@ -396,6 +423,11 @@ async fn main() -> Result<()> {
         Commands::Onboard(args) => {
             let mut secrets = open_secrets(&config)?;
             run_onboard_wizard(&mut config, &mut secrets, args.reset)?;
+        }
+
+        // ── Import ──────────────────────────────────────────────
+        Commands::Import(args) => {
+            run_import(&args, &mut config)?;
         }
 
         // ── Configure ───────────────────────────────────────────
@@ -989,6 +1021,246 @@ fn config_unset(config: &mut Config, path: &str) -> Result<()> {
         "model" | "model.provider" | "model.model" => config.model = None,
         _ => anyhow::bail!("Unknown config path: {}", path),
     }
+    Ok(())
+}
+
+// ── Import from OpenClaw ────────────────────────────────────────────────────
+
+fn run_import(args: &ImportArgs, config: &mut Config) -> Result<()> {
+    use colored::Colorize;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    let source_dir = args
+        .source
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".openclaw"));
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "OpenClaw directory not found: {}\n\
+             Specify the path with: rustyclaw import /path/to/.openclaw",
+            source_dir.display()
+        );
+    }
+
+    let target_dir = args
+        .target
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".rustyclaw"));
+
+    println!(
+        "{} Importing from {} to {}",
+        "→".cyan(),
+        source_dir.display().to_string().yellow(),
+        target_dir.display().to_string().green()
+    );
+
+    if args.dry_run {
+        println!("{}", "(dry run — no changes will be made)".dimmed());
+    }
+
+    // Create target directories
+    let target_workspace = target_dir.join("workspace");
+    let target_credentials = target_dir.join("credentials");
+
+    if !args.dry_run {
+        fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
+        fs::create_dir_all(&target_workspace).context("Failed to create workspace directory")?;
+        fs::create_dir_all(&target_credentials).context("Failed to create credentials directory")?;
+    }
+
+    let mut imported_count = 0;
+    let mut skipped_count = 0;
+
+    // ── Import openclaw.json config ─────────────────────────────────────
+    let openclaw_config_path = source_dir.join("openclaw.json");
+    if openclaw_config_path.exists() {
+        println!("\n{} Importing configuration...", "•".cyan());
+        if let Ok(content) = fs::read_to_string(&openclaw_config_path) {
+            if let Ok(oc_config) = serde_json::from_str::<serde_json::Value>(&content) {
+                // Extract model config
+                if let Some(model_str) = oc_config
+                    .pointer("/agents/defaults/model/primary")
+                    .and_then(|v| v.as_str())
+                {
+                    // Parse "provider/model" format
+                    let parts: Vec<&str> = model_str.splitn(2, '/').collect();
+                    if parts.len() == 2 {
+                        config.model = Some(rustyclaw::config::ModelProvider {
+                            provider: parts[0].to_string(),
+                            model: Some(parts[1].to_string()),
+                            base_url: None,
+                        });
+                        println!("  {} Model: {}", "✓".green(), model_str.cyan());
+                        imported_count += 1;
+                    }
+                }
+
+                // Extract workspace path
+                if let Some(ws) = oc_config
+                    .pointer("/agents/defaults/workspace")
+                    .and_then(|v| v.as_str())
+                {
+                    // Don't import the old workspace path directly — point to new location
+                    println!("  {} Original workspace: {}", "→".yellow(), ws.dimmed());
+                }
+            }
+        }
+    }
+
+    // ── Import workspace files ──────────────────────────────────────────
+    if !args.skip_workspace {
+        let source_workspace = source_dir.join("workspace");
+        if source_workspace.exists() {
+            println!("\n{} Importing workspace files...", "•".cyan());
+
+            // Files to import from workspace root
+            let workspace_files = [
+                "SOUL.md",
+                "AGENTS.md",
+                "TOOLS.md",
+                "USER.md",
+                "IDENTITY.md",
+                "HEARTBEAT.md",
+                "MEMORY.md",
+            ];
+
+            for file in &workspace_files {
+                let src = source_workspace.join(file);
+                let dst = target_workspace.join(file);
+
+                if src.exists() {
+                    if dst.exists() && !args.force {
+                        println!("  {} {} (exists, use --force to overwrite)", "⊘".yellow(), file);
+                        skipped_count += 1;
+                    } else {
+                        if !args.dry_run {
+                            fs::copy(&src, &dst)
+                                .with_context(|| format!("Failed to copy {}", file))?;
+                        }
+                        println!("  {} {}", "✓".green(), file);
+                        imported_count += 1;
+                    }
+                }
+            }
+
+            // Import memory/ directory
+            let src_memory = source_workspace.join("memory");
+            let dst_memory = target_workspace.join("memory");
+            if src_memory.exists() && src_memory.is_dir() {
+                if !args.dry_run {
+                    fs::create_dir_all(&dst_memory)?;
+                }
+
+                let mut memory_count = 0;
+                for entry in fs::read_dir(&src_memory)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file() {
+                        let file_name = path.file_name().unwrap();
+                        let dst_file = dst_memory.join(file_name);
+
+                        if dst_file.exists() && !args.force {
+                            skipped_count += 1;
+                        } else {
+                            if !args.dry_run {
+                                fs::copy(&path, &dst_file)?;
+                            }
+                            memory_count += 1;
+                        }
+                    }
+                }
+                if memory_count > 0 {
+                    println!("  {} memory/ ({} files)", "✓".green(), memory_count);
+                    imported_count += memory_count;
+                }
+            }
+        }
+    }
+
+    // ── Import credentials ──────────────────────────────────────────────
+    if !args.skip_credentials {
+        let source_credentials = source_dir.join("credentials");
+        if source_credentials.exists() {
+            println!("\n{} Importing credentials...", "•".cyan());
+
+            // Map of OpenClaw credential files to secrets
+            let credential_files = [
+                ("github-copilot.token.json", "GITHUB_COPILOT_TOKEN"),
+                ("anthropic.key", "ANTHROPIC_API_KEY"),
+                ("openai.key", "OPENAI_API_KEY"),
+                ("openrouter.key", "OPENROUTER_API_KEY"),
+                ("gemini.key", "GEMINI_API_KEY"),
+                ("xai.key", "XAI_API_KEY"),
+            ];
+
+            let mut secrets = SecretsManager::new(&target_credentials);
+
+            for (file, secret_name) in &credential_files {
+                let src = source_credentials.join(file);
+                if src.exists() {
+                    if let Ok(content) = fs::read_to_string(&src) {
+                        // Handle JSON token files (like github-copilot.token.json)
+                        let token = if file.ends_with(".json") {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                json.get("access_token")
+                                    .or_else(|| json.get("token"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| Some(content.trim().to_string()))
+                            } else {
+                                Some(content.trim().to_string())
+                            }
+                        } else {
+                            Some(content.trim().to_string())
+                        };
+
+                        if let Some(token) = token {
+                            if !token.is_empty() {
+                                if !args.dry_run {
+                                    secrets.store_secret(secret_name, &token)?;
+                                }
+                                println!("  {} {} → {}", "✓".green(), file, secret_name.cyan());
+                                imported_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Save config ─────────────────────────────────────────────────────
+    if !args.dry_run {
+        config.settings_dir = target_dir.clone();
+        config.workspace_dir = Some(target_workspace.clone());
+        config.credentials_dir = Some(target_credentials);
+        config.save(Some(target_dir.join("rustyclaw.toml")))?;
+        println!("\n{} Saved config to {}", "✓".green(), target_dir.join("rustyclaw.toml").display());
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    println!(
+        "\n{} Import complete: {} items imported, {} skipped",
+        "✓".green().bold(),
+        imported_count.to_string().green(),
+        skipped_count.to_string().yellow()
+    );
+
+    if args.dry_run {
+        println!("\n{}", "Run without --dry-run to apply changes.".dimmed());
+    } else {
+        println!(
+            "\n{} Run {} to launch your imported agent!",
+            "→".cyan(),
+            "rustyclaw tui".green()
+        );
+    }
+
     Ok(())
 }
 
