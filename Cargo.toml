@@ -26,10 +26,15 @@ maintenance = { status = "actively-developed" }
 [features]
 default = []
 matrix = ["dep:matrix-sdk"]
-signal = ["dep:presage", "dep:presage-store-sqlite"]
 browser = ["dep:chromiumoxide"]
-all-messengers = ["matrix", "signal"]
-full = ["matrix", "signal", "browser"]
+# Publishable feature sets
+all-messengers = ["matrix"]
+full = ["matrix", "browser"]
+
+# Signal support is temporarily disabled for crates.io publishing.
+# presage and presage-store-sqlite require building from git source.
+# See BUILDING.md for instructions on building with Signal support.
+# signal = ["dep:presage", "dep:presage-store-sqlite"]
 
 [dependencies]
 # TUI dependencies
@@ -99,9 +104,11 @@ httpdate = "1.0"
 # Features: e2e-encryption (default), sqlite (persistence), rustls-tls (TLS)
 matrix-sdk = { version = "0.10", default-features = false, features = ["e2e-encryption", "sqlite"], optional = true }
 
-# Signal messenger support (optional)
-presage = { git = "https://github.com/whisperfish/presage", optional = true }
-presage-store-sqlite = { git = "https://github.com/whisperfish/presage", optional = true }
+# Signal messenger support - DISABLED for crates.io publishing
+# Signal requires presage from git which isn't compatible with crates.io.
+# To build with Signal, clone the repo and use Cargo.signal.toml
+# presage = { version = "0.3", optional = true }
+# presage-store-sqlite = { version = "0.3", optional = true }
 
 # Browser automation (optional)
 chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"], optional = true }
@@ -116,7 +123,7 @@ indicatif = "0.18"
 unicode-width = "0.2"
 rpassword = "7"
 
-# Crypto for presage patch
+# Patches for crypto compatibility
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
 

@@ -18,7 +18,7 @@ use presage::{
     manager::ReceivingMode,
     Manager,
 };
-use presage_store_sqlite::SqliteStore;
+use presage_store_sled::SledStore;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 pub struct SignalMessenger {
     name: String,
     store_path: PathBuf,
-    manager: Option<Arc<Mutex<Manager<SqliteStore, presage::manager::Registered>>>>,
+    manager: Option<Arc<Mutex<Manager<SledStore, presage::manager::Registered>>>>,
     connected: bool,
     /// Pending incoming messages
     pending_messages: Arc<Mutex<Vec<Message>>>,
@@ -57,7 +57,7 @@ impl SignalMessenger {
     where
         F: FnMut(&str) + Send,
     {
-        let store = SqliteStore::open(&self.store_path, None)
+        let store = SledStore::open(&self.store_path, None)
             .await
             .context("Failed to open Signal store")?;
 
@@ -81,7 +81,7 @@ impl SignalMessenger {
 
     /// Register a new account using SMS verification
     pub async fn register(&mut self, phone_number: &str, use_voice: bool) -> Result<String> {
-        let store = SqliteStore::open(&self.store_path, None)
+        let store = SledStore::open(&self.store_path, None)
             .await
             .context("Failed to open Signal store")?;
 
@@ -112,7 +112,7 @@ impl SignalMessenger {
     }
 
     /// Get the manager (must be registered first)
-    fn manager(&self) -> Result<&Arc<Mutex<Manager<SqliteStore, presage::manager::Registered>>>> {
+    fn manager(&self) -> Result<&Arc<Mutex<Manager<SledStore, presage::manager::Registered>>>> {
         self.manager
             .as_ref()
             .context("Signal not registered - call link_device() first")
@@ -146,7 +146,7 @@ impl Messenger for SignalMessenger {
 
     async fn initialize(&mut self) -> Result<()> {
         // Try to open existing store with registration
-        let store = SqliteStore::open(&self.store_path, None)
+        let store = SledStore::open(&self.store_path, None)
             .await
             .context("Failed to open Signal store")?;
 
