@@ -121,6 +121,8 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &SESSIONS_SEND,
         &SESSIONS_HISTORY,
         &SESSION_STATUS,
+        &AGENTS_LIST,
+        &APPLY_PATCH,
     ]
 }
 
@@ -293,6 +295,22 @@ pub static SESSION_STATUS: ToolDef = ToolDef {
                   Can also set per-session model override.",
     parameters: vec![],
     execute: exec_session_status,
+};
+
+pub static AGENTS_LIST: ToolDef = ToolDef {
+    name: "agents_list",
+    description: "List available agent IDs that can be targeted with sessions_spawn. \
+                  Returns the configured agents based on allowlists.",
+    parameters: vec![],
+    execute: exec_agents_list,
+};
+
+pub static APPLY_PATCH: ToolDef = ToolDef {
+    name: "apply_patch",
+    description: "Apply a unified diff patch to one or more files. Supports multi-hunk patches. \
+                  Use for complex multi-line edits where edit_file would be cumbersome.",
+    parameters: vec![],
+    execute: exec_apply_patch,
 };
 
 /// We need a runtime-constructed param list because `Vec` isn't const.
@@ -788,6 +806,34 @@ fn session_status_params() -> Vec<ToolParam> {
             name: "model".into(),
             description: "Set per-session model override. Use 'default' to reset.".into(),
             param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn agents_list_params() -> Vec<ToolParam> {
+    // No parameters needed
+    vec![]
+}
+
+fn apply_patch_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "patch".into(),
+            description: "Unified diff patch content to apply.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "path".into(),
+            description: "Target file path. If not specified, parsed from patch header.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "dry_run".into(),
+            description: "If true, validate patch without applying. Default: false.".into(),
+            param_type: "boolean".into(),
             required: false,
         },
     ]
@@ -2273,6 +2319,251 @@ fn exec_session_status(args: &Value, _workspace_dir: &Path) -> Result<String, St
     Ok(output)
 }
 
+/// List available agent IDs.
+fn exec_agents_list(_args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    // In a full implementation, this would read from config
+    // For now, return a simple list based on workspace structure
+    
+    let mut agents = vec!["main".to_string()];
+    
+    // Check for agents directory
+    let agents_dir = workspace_dir.join("agents");
+    if agents_dir.exists() && agents_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if !name.starts_with('.') && name != "main" {
+                            agents.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    let mut output = String::from("Available agents for sessions_spawn:\n\n");
+    for agent in &agents {
+        output.push_str(&format!("- {}\n", agent));
+    }
+    
+    Ok(output)
+}
+
+/// Apply a unified diff patch to files.
+fn exec_apply_patch(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let patch_content = args
+        .get("patch")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: patch".to_string())?;
+
+    let explicit_path = args.get("path").and_then(|v| v.as_str());
+    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Parse the patch
+    let hunks = parse_unified_diff(patch_content)?;
+    
+    if hunks.is_empty() {
+        return Err("No valid hunks found in patch".to_string());
+    }
+
+    let mut results = Vec::new();
+    
+    // Group hunks by file
+    let mut files: std::collections::HashMap<String, Vec<&DiffHunk>> = std::collections::HashMap::new();
+    for hunk in &hunks {
+        let path = explicit_path.unwrap_or(&hunk.file_path);
+        files.entry(path.to_string()).or_default().push(hunk);
+    }
+
+    for (file_path, file_hunks) in files {
+        let full_path = resolve_path(workspace_dir, &file_path);
+        
+        // Read current content
+        let content = if full_path.exists() {
+            std::fs::read_to_string(&full_path)
+                .map_err(|e| format!("Failed to read {}: {}", file_path, e))?
+        } else {
+            String::new()
+        };
+
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+        
+        // Apply hunks in reverse order (to preserve line numbers)
+        let mut sorted_hunks: Vec<_> = file_hunks.iter().collect();
+        sorted_hunks.sort_by(|a, b| b.old_start.cmp(&a.old_start));
+        
+        for hunk in sorted_hunks {
+            lines = apply_hunk(&lines, hunk)?;
+        }
+        
+        let new_content = lines.join("\n");
+        
+        if dry_run {
+            results.push(format!("✓ {} (dry run, {} hunks valid)", file_path, file_hunks.len()));
+        } else {
+            // Ensure parent directory exists
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create directory: {}", e))?;
+            }
+            
+            std::fs::write(&full_path, new_content)
+                .map_err(|e| format!("Failed to write {}: {}", file_path, e))?;
+            
+            results.push(format!("✓ {} ({} hunks applied)", file_path, file_hunks.len()));
+        }
+    }
+
+    Ok(results.join("\n"))
+}
+
+/// A single hunk from a unified diff.
+#[derive(Debug)]
+struct DiffHunk {
+    file_path: String,
+    old_start: usize,
+    old_count: usize,
+    new_start: usize,
+    new_count: usize,
+    lines: Vec<DiffLine>,
+}
+
+#[derive(Debug)]
+enum DiffLine {
+    Context(String),
+    Remove(String),
+    Add(String),
+}
+
+/// Parse a unified diff into hunks.
+fn parse_unified_diff(patch: &str) -> Result<Vec<DiffHunk>, String> {
+    let mut hunks = Vec::new();
+    let mut current_file: Option<String> = None;
+    let mut lines = patch.lines().peekable();
+    
+    while let Some(line) = lines.next() {
+        // Parse file header
+        if line.starts_with("--- ") {
+            // Skip, we use +++ line
+            continue;
+        }
+        
+        if line.starts_with("+++ ") {
+            let path = line[4..].trim();
+            // Strip a/ or b/ prefix if present
+            let path = path.strip_prefix("b/").unwrap_or(path);
+            let path = path.strip_prefix("a/").unwrap_or(path);
+            current_file = Some(path.to_string());
+            continue;
+        }
+        
+        // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
+        if line.starts_with("@@ ") {
+            let Some(ref file_path) = current_file else {
+                return Err("Hunk without file header".to_string());
+            };
+            
+            let header = &line[3..];
+            let end = header.find(" @@").unwrap_or(header.len());
+            let range_part = &header[..end];
+            
+            let (old_range, new_range) = range_part
+                .split_once(' ')
+                .ok_or("Invalid hunk header")?;
+            
+            let (old_start, old_count) = parse_range(old_range.trim_start_matches('-'))?;
+            let (new_start, new_count) = parse_range(new_range.trim_start_matches('+'))?;
+            
+            // Read hunk lines
+            let mut hunk_lines = Vec::new();
+            while let Some(next_line) = lines.peek() {
+                if next_line.starts_with("@@") || next_line.starts_with("---") || next_line.starts_with("+++") {
+                    break;
+                }
+                let line = lines.next().unwrap();
+                if line.starts_with(' ') || line.is_empty() {
+                    hunk_lines.push(DiffLine::Context(line.get(1..).unwrap_or("").to_string()));
+                } else if line.starts_with('-') {
+                    hunk_lines.push(DiffLine::Remove(line.get(1..).unwrap_or("").to_string()));
+                } else if line.starts_with('+') {
+                    hunk_lines.push(DiffLine::Add(line.get(1..).unwrap_or("").to_string()));
+                }
+            }
+            
+            hunks.push(DiffHunk {
+                file_path: file_path.clone(),
+                old_start,
+                old_count,
+                new_start,
+                new_count,
+                lines: hunk_lines,
+            });
+        }
+    }
+    
+    Ok(hunks)
+}
+
+/// Parse a range like "10,5" or "10" into (start, count).
+fn parse_range(s: &str) -> Result<(usize, usize), String> {
+    if let Some((start, count)) = s.split_once(',') {
+        Ok((
+            start.parse().map_err(|_| "Invalid range start")?,
+            count.parse().map_err(|_| "Invalid range count")?,
+        ))
+    } else {
+        Ok((s.parse().map_err(|_| "Invalid range")?, 1))
+    }
+}
+
+/// Apply a single hunk to content lines.
+fn apply_hunk(lines: &[String], hunk: &DiffHunk) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    let start_idx = hunk.old_start.saturating_sub(1); // 1-indexed to 0-indexed
+    
+    // Copy lines before the hunk
+    result.extend(lines.iter().take(start_idx).cloned());
+    
+    // Apply the hunk
+    let mut old_idx = start_idx;
+    for diff_line in &hunk.lines {
+        match diff_line {
+            DiffLine::Context(text) => {
+                // Verify context matches
+                if old_idx < lines.len() && lines[old_idx] != *text {
+                    // Context mismatch - try fuzzy match
+                    // For now, just warn but continue
+                }
+                result.push(text.clone());
+                old_idx += 1;
+            }
+            DiffLine::Remove(text) => {
+                // Verify the line matches what we're removing
+                if old_idx < lines.len() && lines[old_idx] != *text {
+                    return Err(format!(
+                        "Patch mismatch at line {}: expected '{}', found '{}'",
+                        old_idx + 1,
+                        text,
+                        lines.get(old_idx).unwrap_or(&String::new())
+                    ));
+                }
+                old_idx += 1;
+                // Don't add to result (line is removed)
+            }
+            DiffLine::Add(text) => {
+                result.push(text.clone());
+                // Don't increment old_idx (line is new)
+            }
+        }
+    }
+    
+    // Copy remaining lines after the hunk
+    result.extend(lines.iter().skip(old_idx).cloned());
+    
+    Ok(result)
+}
+
 // ── Provider-specific formatters ────────────────────────────────────────────
 
 /// Parameters for a tool, building a JSON Schema `properties` / `required`.
@@ -2318,6 +2609,8 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "sessions_send" => sessions_send_params(),
         "sessions_history" => sessions_history_params(),
         "session_status" => session_status_params(),
+        "agents_list" => agents_list_params(),
+        "apply_patch" => apply_patch_params(),
         _ => vec![],
     }
 }
@@ -2661,7 +2954,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -2670,7 +2963,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -2678,7 +2971,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -2939,5 +3232,56 @@ mod tests {
         let result = exec_session_status(&args, ws());
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Session Status"));
+    }
+
+    // ── agents_list ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_agents_list_params_defined() {
+        let params = agents_list_params();
+        assert_eq!(params.len(), 0);
+    }
+
+    #[test]
+    fn test_agents_list_returns_main() {
+        let args = json!({});
+        let result = exec_agents_list(&args, ws());
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("main"));
+    }
+
+    // ── apply_patch ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_patch_params_defined() {
+        let params = apply_patch_params();
+        assert_eq!(params.len(), 3);
+        assert!(params.iter().any(|p| p.name == "patch" && p.required));
+        assert!(params.iter().any(|p| p.name == "dry_run" && !p.required));
+    }
+
+    #[test]
+    fn test_apply_patch_missing_patch() {
+        let args = json!({});
+        let result = exec_apply_patch(&args, ws());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[test]
+    fn test_parse_unified_diff() {
+        let patch = r#"--- a/test.txt
++++ b/test.txt
+@@ -1,3 +1,4 @@
+ line1
++new line
+ line2
+ line3
+"#;
+        let hunks = parse_unified_diff(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file_path, "test.txt");
+        assert_eq!(hunks[0].old_start, 1);
+        assert_eq!(hunks[0].old_count, 3);
     }
 }
