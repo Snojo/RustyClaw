@@ -1,4 +1,11 @@
 //! Device tools: nodes, browser, canvas.
+//!
+//! These tools require external service integrations:
+//! - browser: Playwright/CDP for browser automation
+//! - canvas: OpenClaw canvas service for UI rendering
+//! - nodes: OpenClaw node protocol for device pairing
+//!
+//! Current implementations provide helpful stubs that explain what's needed.
 
 use serde_json::Value;
 use std::path::Path;
