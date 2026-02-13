@@ -62,8 +62,8 @@ static CREDENTIALS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 use crate::secrets::SecretsManager;
 
-/// Shared vault type for thread-safe access.
-pub type SharedVault = Arc<Mutex<SecretsManager>>;
+/// Shared vault type for thread-safe access (uses tokio::sync::Mutex for async).
+pub type SharedVault = Arc<tokio::sync::Mutex<SecretsManager>>;
 
 /// Global vault instance, set once at gateway startup.
 static VAULT: OnceLock<SharedVault> = OnceLock::new();

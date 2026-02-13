@@ -368,7 +368,7 @@ impl BrowserStore {
         let domain_lower = domain.to_lowercase();
         let mut result = Vec::new();
 
-        for (stored_domain, cookies) in &self.cookies {
+        for (_stored_domain, cookies) in &self.cookies {
             for cookie in cookies {
                 if !cookie.is_expired()
                     && cookie.matches_domain(&domain_lower)
@@ -376,10 +376,6 @@ impl BrowserStore {
                 {
                     result.push(cookie);
                 }
-            }
-            // Also check if the stored domain itself matches
-            if stored_domain != &cookie.domain.to_lowercase() {
-                // Already checked via cookie.matches_domain
             }
         }
 
