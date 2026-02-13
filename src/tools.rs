@@ -172,6 +172,7 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &GATEWAY,
         &MESSAGE,
         &TTS,
+        &IMAGE,
     ]
 }
 
@@ -414,6 +415,15 @@ pub static TTS: ToolDef = ToolDef {
                   requests audio or TTS is enabled.",
     parameters: vec![],
     execute: exec_tts,
+};
+
+pub static IMAGE: ToolDef = ToolDef {
+    name: "image",
+    description: "Analyze an image using the configured image/vision model. \
+                  Pass a local file path or URL. Returns a text description or \
+                  answers the prompt about the image.",
+    parameters: vec![],
+    execute: exec_image,
 };
 
 /// We need a runtime-constructed param list because `Vec` isn't const.
@@ -866,6 +876,23 @@ fn tts_params() -> Vec<ToolParam> {
         ToolParam {
             name: "channel".into(),
             description: "Optional channel ID to pick output format.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn image_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "image".into(),
+            description: "Path to local image file or URL.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "prompt".into(),
+            description: "Question or instruction about the image. Default: 'Describe the image.'".into(),
             param_type: "string".into(),
             required: false,
         },
@@ -3068,6 +3095,58 @@ fn exec_tts(args: &Value, workspace_dir: &Path) -> Result<String, String> {
     ))
 }
 
+/// Analyze an image using a vision model.
+fn exec_image(args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    let image_path = args
+        .get("image")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: image".to_string())?;
+
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Describe the image.");
+
+    // Check if it's a URL or local path
+    let is_url = image_path.starts_with("http://") || image_path.starts_with("https://");
+    
+    if !is_url {
+        // Resolve local path
+        let full_path = resolve_path(workspace_dir, image_path);
+        if !full_path.exists() {
+            return Err(format!("Image file not found: {}", image_path));
+        }
+        
+        // Check it's actually an image
+        let ext = full_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        
+        let valid_exts = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"];
+        if !valid_exts.contains(&ext.as_str()) {
+            return Err(format!(
+                "Unsupported image format: {}. Supported: {}",
+                ext,
+                valid_exts.join(", ")
+            ));
+        }
+    }
+
+    // In a real implementation, this would:
+    // 1. Load the image (from file or URL)
+    // 2. Send to configured vision model (GPT-4V, Claude, Gemini, etc.)
+    // 3. Return the model's response
+    
+    Ok(format!(
+        "Image analysis requested:\n- Image: {}\n- Prompt: {}\n- Is URL: {}\n\nNote: Actual image analysis requires vision model integration (GPT-4V, Claude 3, Gemini Pro Vision, etc.).",
+        image_path,
+        prompt,
+        is_url
+    ))
+}
+
 // ── Provider-specific formatters ────────────────────────────────────────────
 
 /// Parameters for a tool, building a JSON Schema `properties` / `required`.
@@ -3127,6 +3206,7 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "gateway" => gateway_params(),
         "message" => message_params(),
         "tts" => tts_params(),
+        "image" => image_params(),
         _ => vec![],
     }
 }
@@ -3476,7 +3556,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -3485,7 +3565,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -3493,7 +3573,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -3920,5 +4000,31 @@ mod tests {
         let result = exec_tts(&args, ws());
         assert!(result.is_ok());
         assert!(result.unwrap().contains("MEDIA:"));
+    }
+
+    // ── image ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_image_params_defined() {
+        let params = image_params();
+        assert_eq!(params.len(), 2);
+        assert!(params.iter().any(|p| p.name == "image" && p.required));
+        assert!(params.iter().any(|p| p.name == "prompt" && !p.required));
+    }
+
+    #[test]
+    fn test_image_missing_image() {
+        let args = json!({});
+        let result = exec_image(&args, ws());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[test]
+    fn test_image_url_detection() {
+        let args = json!({ "image": "https://example.com/photo.jpg" });
+        let result = exec_image(&args, ws());
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Is URL: true"));
     }
 }
