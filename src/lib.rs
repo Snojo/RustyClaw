@@ -8,7 +8,7 @@ pub mod daemon;
 pub mod dialogs;
 pub mod gateway;
 pub mod memory;
-pub mod messenger;
+pub mod messengers;
 pub mod onboard;
 pub mod pages;
 pub mod panes;
@@ -23,3 +23,6 @@ pub mod streaming;
 pub mod theme;
 pub mod tools;
 pub mod tui;
+
+// Re-export messenger types at crate root for convenience
+pub use messengers::{Message, Messenger, MessengerManager, SendOptions};
