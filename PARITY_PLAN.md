@@ -2,16 +2,33 @@
 
 ## Current State (RustyClaw)
 
-### ✅ Implemented Tools (9 total)
+### ✅ Implemented Tools (26 total)
 1. `read_file` — read file contents with line ranges; auto-extracts text from .docx/.doc/.rtf/.pdf via textutil
 2. `write_file` — create/overwrite files
 3. `edit_file` — search-and-replace edits
 4. `list_directory` — list directory contents
 5. `search_files` — grep-like content search (case-insensitive)
 6. `find_files` — find files by name/glob (keyword mode + glob mode, case-insensitive)
-7. `execute_command` — run shell commands (with timeout)
+7. `execute_command` — run shell commands (with timeout, background support)
 8. `web_fetch` — fetch URL and extract readable text
-9. `web_search` — search the web via search engine integration
+9. `web_search` — search the web via Brave Search API
+10. `process` — background process management (list, poll, log, write, kill)
+11. `memory_search` — BM25 keyword search over MEMORY.md + memory/*.md
+12. `memory_get` — snippet retrieval with line ranges
+13. `cron` — scheduled job management (at, every, cron expressions)
+14. `sessions_list` — list active sessions with filters
+15. `sessions_spawn` — spawn sub-agent background tasks
+16. `sessions_send` — send messages to other sessions
+17. `sessions_history` — fetch session message history
+18. `session_status` — usage/cost tracking and session info
+19. `agents_list` — list available agents for spawning
+20. `apply_patch` — multi-hunk unified diff patches
+21. `secrets_list` — list secrets from encrypted vault
+22. `secrets_get` — retrieve secret by key
+23. `secrets_store` — store/update encrypted secret
+24. `gateway` — config get/apply/patch, restart, update
+25. `message` — cross-platform messaging (send, broadcast)
+26. `tts` — text-to-speech conversion
 
 ### ✅ Implemented Features
 - Multi-provider support (OpenAI, Anthropic, Google, GitHub Copilot, xAI, OpenRouter, Ollama, custom)
@@ -277,21 +294,25 @@ Needed: Extended config for:
 |----------|--------|----------|
 | File tools (read, write, edit, list, search, find) | ✅ Complete | 6/6 |
 | Web tools (fetch, search) | ✅ Complete | 2/2 |
-| Shell execution | ✅ Complete | 1/1 (blocking only) |
+| Shell execution | ✅ Complete | 1/1 (with background) |
+| Process management | ✅ Complete | list, poll, log, write, kill |
+| Memory system | ✅ Complete | search + get |
+| Cron/scheduling | ✅ Complete | at, every, cron |
+| Multi-session / multi-agent | ✅ Complete | list, spawn, send, history, status |
+| Secrets vault & policies | ✅ Complete | list, get, store |
+| Gateway control | ✅ Complete | config get/apply/patch, restart |
+| Message tool | ✅ Complete | send, broadcast |
+| TTS | ✅ Complete | text-to-speech stub |
+| Apply patch | ✅ Complete | multi-hunk diff |
 | Context management (compaction, token tracking) | ✅ Complete | — |
 | Conversation memory (persistence, replay) | ✅ Complete | — |
 | Gateway (auth, heartbeat, message types) | ✅ Complete | — |
 | CLI commands | ✅ Complete | 10 subcommands |
 | TUI commands | ✅ Complete | 12+ slash-commands |
-| Secrets vault & policies | ✅ Complete | — |
 | Skills (loading, format support) | ⚠️ Partial | Load only, no execution runtime |
 | Messengers | ⚠️ Partial | Trait only, no backends |
 | Provider streaming | ❌ Not started | Non-streaming |
-| Process management | ❌ Not started | — |
-| Memory system | ❌ Not started | — |
-| Multi-session / multi-agent | ❌ Not started | — |
 | Browser automation | ❌ Not started | — |
-| Cron/scheduling | ❌ Not started | — |
 | Node/device control | ❌ Not started | — |
 | Canvas | ❌ Not started | — |
-| Image/TTS/apply_patch | ❌ Not started | — |
+| Image analysis | ❌ Not started | — |
