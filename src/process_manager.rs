@@ -213,7 +213,10 @@ impl ExecSession {
             }
             Ok(None) => {
                 // Still running, check timeout
-                if self.is_timed_out() {
+                let timed_out = self.timeout
+                    .map(|t| self.started_at.elapsed() > t)
+                    .unwrap_or(false);
+                if timed_out {
                     let _ = child.kill();
                     self.status = SessionStatus::TimedOut;
                     self.exit_code = None;

@@ -23,6 +23,42 @@ pub fn process_manager() -> &'static SharedProcessManager {
     PROCESS_MANAGER.get_or_init(|| Arc::new(Mutex::new(ProcessManager::new())))
 }
 
+// ── Credentials directory protection ────────────────────────────────────────
+
+/// Absolute path of the credentials directory, set once at gateway startup.
+static CREDENTIALS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Called once from the gateway to register the credentials path.
+pub fn set_credentials_dir(path: PathBuf) {
+    let _ = CREDENTIALS_DIR.set(path);
+}
+
+/// Returns `true` when `path` falls inside the credentials directory.
+pub fn is_protected_path(path: &Path) -> bool {
+    if let Some(cred_dir) = CREDENTIALS_DIR.get() {
+        // Canonicalise both so symlinks / ".." can't bypass the check.
+        let canon_cred = match cred_dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return false, // dir doesn't exist yet – nothing to protect
+        };
+        let canon_path = match path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // File may not exist yet (write_file).  Fall back to
+                // starts_with on the raw absolute path.
+                return path.starts_with(cred_dir);
+            }
+        };
+        canon_path.starts_with(&canon_cred)
+    } else {
+        false
+    }
+}
+
+/// Standard denial message when a tool tries to touch the vault.
+const VAULT_ACCESS_DENIED: &str =
+    "Access denied: the credentials directory is protected. Use the secrets_list / secrets_get / secrets_store tools instead.";
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Resolve a path argument against the workspace root.
@@ -65,11 +101,18 @@ fn display_path(found: &Path, workspace_dir: &Path) -> String {
 fn should_visit(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     if entry.file_type().is_dir() {
-        !matches!(
+        if matches!(
             name.as_ref(),
             ".git" | "node_modules" | "target" | ".hg" | ".svn"
                 | "__pycache__" | "dist" | "build"
-        )
+        ) {
+            return false;
+        }
+        // Never recurse into the credentials directory.
+        if is_protected_path(entry.path()) {
+            return false;
+        }
+        true
     } else {
         true
     }
@@ -123,6 +166,9 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &SESSION_STATUS,
         &AGENTS_LIST,
         &APPLY_PATCH,
+        &SECRETS_LIST,
+        &SECRETS_GET,
+        &SECRETS_STORE,
     ]
 }
 
@@ -311,6 +357,33 @@ pub static APPLY_PATCH: ToolDef = ToolDef {
                   Use for complex multi-line edits where edit_file would be cumbersome.",
     parameters: vec![],
     execute: exec_apply_patch,
+};
+
+pub static SECRETS_LIST: ToolDef = ToolDef {
+    name: "secrets_list",
+    description: "List the names (keys) stored in the encrypted secrets vault. \
+                  Returns only key names, never values. Use secrets_get to \
+                  retrieve a specific value.",
+    parameters: vec![],
+    execute: exec_secrets_stub,
+};
+
+pub static SECRETS_GET: ToolDef = ToolDef {
+    name: "secrets_get",
+    description: "Retrieve a secret value from the encrypted vault by key name. \
+                  The value is returned as a string. Prefer injecting it directly \
+                  into environment variables or config rather than echoing it.",
+    parameters: vec![],
+    execute: exec_secrets_stub,
+};
+
+pub static SECRETS_STORE: ToolDef = ToolDef {
+    name: "secrets_store",
+    description: "Store or update a key/value pair in the encrypted secrets vault. \
+                  The value is encrypted at rest. Use for API keys, tokens, and \
+                  other sensitive material.",
+    parameters: vec![],
+    execute: exec_secrets_stub,
 };
 
 /// We need a runtime-constructed param list because `Vec` isn't const.
@@ -631,6 +704,54 @@ fn memory_get_params() -> Vec<ToolParam> {
     ]
 }
 
+fn secrets_list_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "prefix".into(),
+            description: "Optional prefix to filter key names.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn secrets_get_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "key".into(),
+            description: "The name of the secret to retrieve.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+    ]
+}
+
+fn secrets_store_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "key".into(),
+            description: "The name under which to store the secret.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "value".into(),
+            description: "The secret value to encrypt and store.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+    ]
+}
+
+/// Stub executor for secrets tools – always errors.
+///
+/// Real execution is intercepted by the gateway *before* `execute_tool` is
+/// reached.  If we end up here it means something bypassed the gateway
+/// interception layer, so we refuse with a clear message.
+fn exec_secrets_stub(_args: &Value, _workspace_dir: &Path) -> Result<String, String> {
+    Err("Secrets tools must be executed through the gateway layer".to_string())
+}
+
 fn cron_params() -> Vec<ToolParam> {
     vec![
         ToolParam {
@@ -875,6 +996,10 @@ fn exec_read_file(args: &Value, workspace_dir: &Path) -> Result<String, String> 
 
     let path = resolve_path(workspace_dir, path_str);
 
+    if is_protected_path(&path) {
+        return Err(VAULT_ACCESS_DENIED.to_string());
+    }
+
     // First, try reading as UTF-8 plain text.
     let content = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -994,6 +1119,10 @@ fn exec_write_file(args: &Value, workspace_dir: &Path) -> Result<String, String>
 
     let path = resolve_path(workspace_dir, path_str);
 
+    if is_protected_path(&path) {
+        return Err(VAULT_ACCESS_DENIED.to_string());
+    }
+
     // Always create parent directories.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -1025,6 +1154,10 @@ fn exec_edit_file(args: &Value, workspace_dir: &Path) -> Result<String, String> 
         .ok_or_else(|| "Missing required parameter: new_string".to_string())?;
 
     let path = resolve_path(workspace_dir, path_str);
+
+    if is_protected_path(&path) {
+        return Err(VAULT_ACCESS_DENIED.to_string());
+    }
 
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
@@ -1059,6 +1192,10 @@ fn exec_list_directory(args: &Value, workspace_dir: &Path) -> Result<String, Str
         .ok_or_else(|| "Missing required parameter: path".to_string())?;
 
     let path = resolve_path(workspace_dir, path_str);
+
+    if is_protected_path(&path) {
+        return Err(VAULT_ACCESS_DENIED.to_string());
+    }
 
     let entries = std::fs::read_dir(&path)
         .map_err(|e| format!("Failed to read directory '{}': {}", path.display(), e))?;
@@ -1302,6 +1439,17 @@ fn exec_execute_command(args: &Value, workspace_dir: &Path) -> Result<String, St
         Some(p) => resolve_path(workspace_dir, p),
         None => workspace_dir.to_path_buf(),
     };
+
+    // Block commands that reference the credentials directory.
+    if let Some(cred_dir) = CREDENTIALS_DIR.get() {
+        let cred_str = cred_dir.to_string_lossy();
+        if command.contains(cred_str.as_ref()) {
+            return Err(VAULT_ACCESS_DENIED.to_string());
+        }
+    }
+    if is_protected_path(&cwd) {
+        return Err(VAULT_ACCESS_DENIED.to_string());
+    }
 
     // If background requested immediately, spawn and return session ID
     if background {
@@ -1784,7 +1932,7 @@ fn exec_process(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
             session.try_read_output();
             let exited = session.check_exit();
 
-            let new_output = session.poll_output();
+            let new_output = session.poll_output().to_string();
             let status_str = match &session.status {
                 SessionStatus::Running => "running".to_string(),
                 SessionStatus::Exited(code) => format!("exited ({})", code),
@@ -1794,7 +1942,7 @@ fn exec_process(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
 
             let mut result = String::new();
             if !new_output.is_empty() {
-                result.push_str(new_output);
+                result.push_str(&new_output);
                 if !new_output.ends_with('\n') {
                     result.push('\n');
                 }
@@ -2611,6 +2759,9 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "session_status" => session_status_params(),
         "agents_list" => agents_list_params(),
         "apply_patch" => apply_patch_params(),
+        "secrets_list" => secrets_list_params(),
+        "secrets_get" => secrets_get_params(),
+        "secrets_store" => secrets_store_params(),
         _ => vec![],
     }
 }
@@ -2691,6 +2842,12 @@ pub fn tools_google() -> Vec<Value> {
 }
 
 // ── Tool execution ──────────────────────────────────────────────────────────
+
+/// Returns `true` for tools that must be routed through the gateway
+/// (i.e. handled by `execute_secrets_tool`) rather than `execute_tool`.
+pub fn is_secrets_tool(name: &str) -> bool {
+    matches!(name, "secrets_list" | "secrets_get" | "secrets_store")
+}
 
 /// Find a tool by name and execute it with the given arguments.
 pub fn execute_tool(name: &str, args: &Value, workspace_dir: &Path) -> Result<String, String> {
@@ -2954,7 +3111,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 23);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -2963,7 +3120,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 23);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -2971,7 +3128,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 23);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -3029,7 +3186,8 @@ mod tests {
     #[test]
     fn test_web_search_no_api_key() {
         // Clear any existing key for the test
-        std::env::remove_var("BRAVE_API_KEY");
+        // SAFETY: This test is single-threaded and no other thread reads BRAVE_API_KEY.
+        unsafe { std::env::remove_var("BRAVE_API_KEY") };
         let args = json!({ "query": "test" });
         let result = exec_web_search(&args, ws());
         assert!(result.is_err());
@@ -3283,5 +3441,52 @@ mod tests {
         assert_eq!(hunks[0].file_path, "test.txt");
         assert_eq!(hunks[0].old_start, 1);
         assert_eq!(hunks[0].old_count, 3);
+    }
+
+    // ── secrets tools ───────────────────────────────────────────────
+
+    #[test]
+    fn test_secrets_stub_rejects() {
+        let args = json!({});
+        let result = exec_secrets_stub(&args, ws());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("gateway"));
+    }
+
+    #[test]
+    fn test_is_secrets_tool() {
+        assert!(is_secrets_tool("secrets_list"));
+        assert!(is_secrets_tool("secrets_get"));
+        assert!(is_secrets_tool("secrets_store"));
+        assert!(!is_secrets_tool("read_file"));
+        assert!(!is_secrets_tool("memory_get"));
+    }
+
+    #[test]
+    fn test_secrets_list_params_defined() {
+        let params = secrets_list_params();
+        assert_eq!(params.len(), 1);
+        assert!(params.iter().any(|p| p.name == "prefix" && !p.required));
+    }
+
+    #[test]
+    fn test_secrets_get_params_defined() {
+        let params = secrets_get_params();
+        assert_eq!(params.len(), 1);
+        assert!(params.iter().any(|p| p.name == "key" && p.required));
+    }
+
+    #[test]
+    fn test_secrets_store_params_defined() {
+        let params = secrets_store_params();
+        assert_eq!(params.len(), 2);
+        assert!(params.iter().any(|p| p.name == "key" && p.required));
+        assert!(params.iter().any(|p| p.name == "value" && p.required));
+    }
+
+    #[test]
+    fn test_protected_path_without_init() {
+        // Before set_credentials_dir is called, nothing is protected.
+        assert!(!is_protected_path(Path::new("/some/random/path")));
     }
 }

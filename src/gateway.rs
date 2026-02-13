@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::providers;
-use crate::secrets::SecretsManager;
+use crate::secrets::{AccessContext, AccessPolicy, CredentialValue, SecretEntry, SecretKind, SecretsManager};
 use crate::tools;
 use anyhow::{Context, Result};
 use futures_util::stream::SplitSink;
@@ -573,6 +573,10 @@ pub async fn run_gateway(
     vault: SharedVault,
     cancel: CancellationToken,
 ) -> Result<()> {
+    // Register the credentials directory so file-access tools can enforce
+    // the vault boundary (blocks read_file, execute_command, etc.).
+    tools::set_credentials_dir(config.credentials_dir());
+
     let addr = resolve_listen_addr(&options.listen)?;
     let listener = TcpListener::bind(addr)
         .await
@@ -928,6 +932,7 @@ async fn handle_connection(
                             copilot_session.as_deref(),
                             &mut writer,
                             &workspace_dir,
+                            &vault,
                         )
                         .await
                         {
@@ -1000,6 +1005,214 @@ async fn wait_for_auth_response(
     anyhow::bail!("Connection closed before authentication completed")
 }
 
+/// Execute a secrets-vault tool against the shared vault.
+///
+/// These are intercepted before the generic `tools::execute_tool` path
+/// because they require `SharedVault` access — the normal tool signature
+/// only receives `(args, workspace_dir)`.
+///
+/// Access control is delegated entirely to [`SecretsManager::check_access`]
+/// and the per-credential [`AccessPolicy`].  The agent gets an
+/// [`AccessContext`] with `user_approved = false` (the tool invocation
+/// itself does not constitute user approval) and `authenticated = false`
+/// (no re-auth has occurred).  This means:
+///
+/// - `Always` credentials are readable.
+/// - `WithApproval` credentials are only readable if `agent_access_enabled`
+///   is set in config.
+/// - `WithAuth` and `SkillOnly` credentials are denied.
+async fn execute_secrets_tool(
+    name: &str,
+    args: &serde_json::Value,
+    vault: &SharedVault,
+) -> Result<String, String> {
+    match name {
+        "secrets_list" => exec_secrets_list(vault).await,
+        "secrets_get" => exec_secrets_get(args, vault).await,
+        "secrets_store" => exec_secrets_store(args, vault).await,
+        _ => Err(format!("Unknown secrets tool: {}", name)),
+    }
+}
+
+/// List all credentials in the vault (names, kinds, policies — no values).
+async fn exec_secrets_list(vault: &SharedVault) -> Result<String, String> {
+    let mut mgr = vault.lock().await;
+    let entries = mgr.list_all_entries();
+
+    if entries.is_empty() {
+        return Ok("No credentials stored in the vault.".into());
+    }
+
+    let mut lines = Vec::with_capacity(entries.len() + 1);
+    lines.push(format!("{} credential(s) in vault:\n", entries.len()));
+
+    for (name, entry) in &entries {
+        let disabled = if entry.disabled { " [DISABLED]" } else { "" };
+        let desc = entry
+            .description
+            .as_deref()
+            .map(|d| format!(" — {}", d))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  • {} ({}, policy: {}){}{}\n",
+            name, entry.kind, entry.policy, disabled, desc,
+        ));
+    }
+
+    Ok(lines.join(""))
+}
+
+/// Retrieve a single credential value from the vault.
+async fn exec_secrets_get(
+    args: &serde_json::Value,
+    vault: &SharedVault,
+) -> Result<String, String> {
+    let cred_name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: name".to_string())?;
+
+    let ctx = AccessContext {
+        user_approved: false,
+        authenticated: false,
+        active_skill: None,
+    };
+
+    let mut mgr = vault.lock().await;
+    match mgr.get_credential(cred_name, &ctx) {
+        Ok(Some((entry, value))) => {
+            Ok(format_credential_value(cred_name, &entry, &value))
+        }
+        Ok(None) => Err(format!(
+            "Credential '{}' not found. Use secrets_list to see available credentials.",
+            cred_name,
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Format a credential value for returning to the model.
+fn format_credential_value(
+    name: &str,
+    entry: &SecretEntry,
+    value: &CredentialValue,
+) -> String {
+    match value {
+        CredentialValue::Single(v) => {
+            format!("[{}] {} = {}", entry.kind, name, v)
+        }
+        CredentialValue::UserPass { username, password } => {
+            format!(
+                "[{}] {}\n  username: {}\n  password: {}",
+                entry.kind, name, username, password,
+            )
+        }
+        CredentialValue::SshKeyPair { private_key, public_key } => {
+            format!(
+                "[{}] {}\n  public_key: {}\n  private_key: <{} chars>",
+                entry.kind,
+                name,
+                public_key,
+                private_key.len(),
+            )
+        }
+        CredentialValue::FormFields(fields) => {
+            let mut out = format!("[{}] {}\n", entry.kind, name);
+            for (k, v) in fields {
+                out.push_str(&format!("  {}: {}\n", k, v));
+            }
+            out
+        }
+        CredentialValue::PaymentCard {
+            cardholder,
+            number,
+            expiry,
+            cvv,
+            extra,
+        } => {
+            let mut out = format!(
+                "[{}] {}\n  cardholder: {}\n  number: {}\n  expiry: {}\n  cvv: {}",
+                entry.kind, name, cardholder, number, expiry, cvv,
+            );
+            for (k, v) in extra {
+                out.push_str(&format!("\n  {}: {}", k, v));
+            }
+            out
+        }
+    }
+}
+
+/// Store a new credential in the vault.
+async fn exec_secrets_store(
+    args: &serde_json::Value,
+    vault: &SharedVault,
+) -> Result<String, String> {
+    let cred_name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: name".to_string())?;
+
+    let kind_str = args
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: kind".to_string())?;
+
+    let value = args
+        .get("value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: value".to_string())?;
+
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let username = args.get("username").and_then(|v| v.as_str());
+
+    let kind = match kind_str {
+        "api_key" => SecretKind::ApiKey,
+        "token" => SecretKind::Token,
+        "username_password" => SecretKind::UsernamePassword,
+        "ssh_key" => SecretKind::SshKey,
+        "secure_note" => SecretKind::SecureNote,
+        "http_passkey" => SecretKind::HttpPasskey,
+        "form_autofill" => SecretKind::FormAutofill,
+        "payment_method" => SecretKind::PaymentMethod,
+        "other" => SecretKind::Other,
+        _ => {
+            return Err(format!(
+                "Unknown credential kind: '{}'. Use one of: api_key, token, \
+                 username_password, ssh_key, secure_note, http_passkey, \
+                 form_autofill, payment_method, other.",
+                kind_str,
+            ));
+        }
+    };
+
+    if kind == SecretKind::UsernamePassword && username.is_none() {
+        return Err(
+            "username_password credentials require the 'username' parameter.".into(),
+        );
+    }
+
+    let entry = SecretEntry {
+        label: cred_name.to_string(),
+        kind,
+        policy: AccessPolicy::default(), // WithApproval
+        description,
+        disabled: false,
+    };
+
+    let mut mgr = vault.lock().await;
+    mgr.store_credential(cred_name, &entry, value, username)
+        .map_err(|e| format!("Failed to store credential: {}", e))?;
+
+    Ok(format!(
+        "Credential '{}' stored successfully (kind: {}, policy: {}).",
+        cred_name, entry.kind, entry.policy,
+    ))
+}
+
 /// Route an incoming text frame to the appropriate handler.
 ///
 /// Implements an agentic tool loop: the model is called, and if it
@@ -1013,6 +1226,7 @@ async fn dispatch_text_message(
     copilot_session: Option<&CopilotSession>,
     writer: &mut WsWriter,
     workspace_dir: &std::path::Path,
+    vault: &SharedVault,
 ) -> Result<()> {
     // Try to parse as a structured JSON request.
     let req = match serde_json::from_str::<ChatRequest>(text) {
@@ -1164,9 +1378,17 @@ async fn dispatch_text_message(
                 .context("Failed to send tool_call frame")?;
 
             // Execute the tool.
-            let (output, is_error) = match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
-                Ok(text) => (text, false),
-                Err(err) => (err, true),
+            let (output, is_error) = if tools::is_secrets_tool(&tc.name) {
+                // Secrets tools are handled here — they need vault access.
+                match execute_secrets_tool(&tc.name, &tc.arguments, vault).await {
+                    Ok(text) => (text, false),
+                    Err(err) => (err, true),
+                }
+            } else {
+                match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
+                    Ok(text) => (text, false),
+                    Err(err) => (err, true),
+                }
             };
 
             // Notify the client about the result.
