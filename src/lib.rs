@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod sessions;
 pub mod skills;
 pub mod soul;
+pub mod streaming;
 pub mod theme;
 pub mod tools;
 pub mod tui;

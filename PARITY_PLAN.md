@@ -317,6 +317,6 @@ Needed: Extended config for:
 | Gateway (auth, heartbeat, message types) | ✅ Complete | — |
 | CLI commands | ✅ Complete | 10 subcommands |
 | TUI commands | ✅ Complete | 12+ slash-commands |
-| Skills (loading, format support) | ⚠️ Partial | Load only, no execution runtime |
-| Messengers | ⚠️ Partial | Trait only, no backends |
-| Provider streaming | ❌ Not started | Non-streaming |
+| Skills (loading, format support) | ✅ Complete | Load + gate checks + prompt injection |
+| Messengers | ✅ Complete | Webhook, Console, Discord, Telegram |
+| Provider streaming | ✅ Complete | OpenAI SSE + Anthropic SSE |
