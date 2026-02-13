@@ -46,6 +46,21 @@ RustyClaw was built with the assumption that **AI agents can't always be trusted
 cargo install rustyclaw
 ```
 
+### With optional features
+
+```bash
+# Matrix messenger support
+cargo install rustyclaw --features matrix
+
+# Browser automation (CDP)
+cargo install rustyclaw --features browser
+
+# All publishable features
+cargo install rustyclaw --features full
+```
+
+> 📝 **Signal messenger** requires building from source. See [BUILDING.md](BUILDING.md).
+
 ### Or build from source
 
 ```bash
@@ -162,6 +177,7 @@ allow_paths = []
 
 ## Documentation
 
+- **[Building](BUILDING.md)** — Feature flags, Signal support, cross-compilation
 - **[Getting Started](docs/getting-started.md)** — Installation and first run
 - **[Security Model](docs/SECURITY.md)** — How RustyClaw protects your secrets
 - **[Tools Reference](docs/tools.md)** — All 30 tools explained
