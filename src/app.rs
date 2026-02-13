@@ -14,6 +14,11 @@ use crate::action::Action;
 use crate::commands::{handle_command, CommandAction, CommandContext};
 use crate::config::Config;
 use crate::daemon;
+use crate::dialogs::{
+    self, ApiKeyDialogState, AuthPromptState, CredDialogOption, CredentialDialogState,
+    FetchModelsLoading, ModelSelectorState, PolicyPickerState, ProviderSelectorState,
+    SecretViewerState, TotpDialogPhase, TotpDialogState, VaultUnlockPromptState, SPINNER_FRAMES,
+};
 use crate::gateway::ChatMessage;
 use crate::pages::hatching::Hatching;
 use crate::pages::home::Home;
@@ -29,138 +34,6 @@ use crate::tui::{Event, EventResponse, Tui};
 
 /// Type alias for the client-side WebSocket write half.
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-
-/// Phase of the API-key dialog overlay.
-#[derive(Debug, Clone, PartialEq)]
-enum ApiKeyDialogPhase {
-    /// Prompting the user to enter an API key (text is masked)
-    EnterKey,
-    /// Asking whether to store the entered key permanently
-    ConfirmStore,
-}
-
-/// Spinner state shown while fetching models from a provider API.
-struct FetchModelsLoading {
-    /// Display name of the provider
-    display: String,
-    /// Tick counter for the spinner animation
-    tick: usize,
-}
-
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// State for the model-selector dialog overlay.
-struct ModelSelectorState {
-    /// Provider this selection is for
-    provider: String,
-    /// Display name
-    display: String,
-    /// Available model names
-    models: Vec<String>,
-    /// Currently highlighted index
-    selected: usize,
-    /// Scroll offset when the list is longer than the dialog
-    scroll_offset: usize,
-}
-
-/// State for the provider-selector dialog overlay.
-struct ProviderSelectorState {
-    /// Provider entries: (id, display)
-    providers: Vec<(String, String)>,
-    /// Currently highlighted index
-    selected: usize,
-    /// Scroll offset
-    scroll_offset: usize,
-}
-
-/// Which option is highlighted in the credential-management dialog.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CredDialogOption {
-    ViewSecret,
-    CopySecret,
-    ChangePolicy,
-    ToggleDisable,
-    Delete,
-    SetupTotp,
-    Cancel,
-}
-
-/// State for the credential-management dialog overlay.
-struct CredentialDialogState {
-    /// Vault key name of the credential
-    name: String,
-    /// Whether the credential is currently disabled
-    disabled: bool,
-    /// Whether 2FA is currently configured for the vault
-    has_totp: bool,
-    /// Current access policy of the credential
-    current_policy: crate::secrets::AccessPolicy,
-    /// Currently highlighted menu option
-    selected: CredDialogOption,
-}
-
-/// Which policy option is highlighted in the policy-picker dialog.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PolicyPickerOption {
-    Open,
-    Ask,
-    Auth,
-    Skill,
-}
-
-/// Phase of the SKILL-policy sub-flow inside the policy picker.
-#[derive(Debug, Clone, PartialEq)]
-enum PolicyPickerPhase {
-    /// Selecting among OPEN / ASK / AUTH / SKILL
-    Selecting,
-    /// Editing the skill name list (comma-separated)
-    EditingSkills { input: String },
-}
-
-/// State for the access-policy picker dialog overlay.
-struct PolicyPickerState {
-    /// Vault key name of the credential
-    cred_name: String,
-    /// Currently highlighted policy option
-    selected: PolicyPickerOption,
-    /// Current dialog phase
-    phase: PolicyPickerPhase,
-}
-
-/// Phase of the TOTP setup dialog.
-#[derive(Debug, Clone, PartialEq)]
-enum TotpDialogPhase {
-    /// Show the otpauth URL and ask user to enter TOTP code to verify
-    ShowUri { uri: String, input: String },
-    /// TOTP is already set up — offer to remove it
-    AlreadyConfigured,
-    /// Verification succeeded
-    Verified,
-    /// Verification failed — let the user retry
-    Failed { uri: String, input: String },
-}
-
-/// State for the 2FA (TOTP) setup dialog overlay.
-struct TotpDialogState {
-    phase: TotpDialogPhase,
-}
-
-/// State for the secret-viewer dialog overlay.
-struct SecretViewerState {
-    /// Vault key name of the credential
-    name: String,
-    /// Decrypted (label, value) pairs
-    fields: Vec<(String, String)>,
-    /// Whether the values are currently revealed (unmasked)
-    revealed: bool,
-    /// Which field is highlighted (for copying)
-    selected: usize,
-    /// Scroll offset when the list is longer than the dialog
-    #[allow(dead_code)]
-    scroll_offset: usize,
-    /// Transient status message (e.g. "Copied!")
-    status: Option<String>,
-}
 
 /// Shared state that is separate from the UI components so we can borrow both
 /// independently.
@@ -247,33 +120,6 @@ pub struct App {
     showing_hatching: bool,
 }
 
-/// State for the API-key input dialog overlay.
-struct ApiKeyDialogState {
-    /// Which provider this key is for
-    provider: String,
-    /// Display name for the provider
-    display: String,
-    /// Name of the secret key (e.g. "ANTHROPIC_API_KEY")
-    #[allow(dead_code)]
-    secret_key: String,
-    /// Current input buffer (the API key being typed)
-    input: String,
-    /// Which phase the dialog is in
-    phase: ApiKeyDialogPhase,
-}
-
-/// State for the gateway TOTP authentication prompt dialog.
-struct AuthPromptState {
-    /// Current input buffer (the 6-digit TOTP code being typed)
-    input: String,
-}
-
-/// State for the gateway vault unlock prompt dialog.
-struct VaultUnlockPromptState {
-    /// Current input buffer (the vault password being typed)
-    input: String,
-}
-
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         let secrets_manager = SecretsManager::new(config.credentials_dir());
@@ -302,13 +148,13 @@ impl App {
         // 3. User RustyClaw skills (~/.rustyclaw/workspace/skills)
         // 4. Configured skills_dir (if different)
         let mut skills_dirs = Vec::new();
-        
+
         // OpenClaw bundled skills (npm global install)
         let openclaw_bundled = PathBuf::from("/usr/lib/node_modules/openclaw/skills");
         if openclaw_bundled.exists() {
             skills_dirs.push(openclaw_bundled);
         }
-        
+
         // OpenClaw user skills
         if let Some(home) = dirs::home_dir() {
             let openclaw_user = home.join(".openclaw/workspace/skills");
@@ -316,11 +162,11 @@ impl App {
                 skills_dirs.push(openclaw_user);
             }
         }
-        
+
         // RustyClaw user skills (primary)
         let rustyclaw_skills = config.skills_dir();
         skills_dirs.push(rustyclaw_skills);
-        
+
         let mut skill_manager = SkillManager::with_dirs(skills_dirs);
         let _ = skill_manager.load_skills();
 
@@ -352,7 +198,8 @@ impl App {
 
         // Replay previous conversation turns into the display messages
         // so the user can see their past context.
-        let mut messages = vec![DisplayMessage::info("Welcome to RustyClaw! Type /help for commands.")];
+        let mut messages =
+            vec![DisplayMessage::info("Welcome to RustyClaw! Type /help for commands.")];
         let prior_turns: usize = conversation_history
             .iter()
             .filter(|m| m.role != "system")
@@ -468,15 +315,15 @@ impl App {
                                     if self.device_flow_loading.is_some() {
                                         self.device_flow_loading = None;
                                         self.state.loading_line = None;
-                                        self.state.messages.push(
-                                            DisplayMessage::info("Device flow authentication cancelled."),
-                                        );
+                                        self.state.messages.push(DisplayMessage::info(
+                                            "Device flow authentication cancelled.",
+                                        ));
                                     } else {
                                         self.fetch_loading = None;
                                         self.state.loading_line = None;
-                                        self.state.messages.push(
-                                            DisplayMessage::info("Model fetch cancelled."),
-                                        );
+                                        self.state
+                                            .messages
+                                            .push(DisplayMessage::info("Model fetch cancelled."));
                                     }
                                     // Consume the Esc so it doesn't propagate
                                     continue;
@@ -606,7 +453,8 @@ impl App {
                                     }
                                     crossterm::event::KeyCode::Enter => {
                                         let creds = self.state.secrets_manager.list_all_entries();
-                                        if let Some((name, entry)) = creds.get(self.secrets_scroll) {
+                                        if let Some((name, entry)) = creds.get(self.secrets_scroll)
+                                        {
                                             self.show_secrets_dialog = false;
                                             Some(Action::ShowCredentialDialog {
                                                 name: name.clone(),
@@ -714,308 +562,7 @@ impl App {
                 return Ok(None);
             }
             Action::GatewayMessage(text) => {
-                // Parse the gateway JSON envelope.
-                let parsed = serde_json::from_str::<serde_json::Value>(text).ok();
-                let frame_type = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("type").and_then(|t| t.as_str()));
-
-                // ── Handle status frames from the gateway ────────────
-                if frame_type == Some("status") {
-                    let status = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("status").and_then(|s| s.as_str()))
-                        .unwrap_or("");
-                    let detail = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("detail").and_then(|d| d.as_str()))
-                        .unwrap_or("");
-
-                    match status {
-                        "model_configured" => {
-                            self.state.messages.push(DisplayMessage::info(format!("Model: {}", detail)));
-                        }
-                        "credentials_loaded" => {
-                            self.state.messages.push(DisplayMessage::info(detail));
-                        }
-                        "credentials_missing" => {
-                            self.state.gateway_status = GatewayStatus::ModelError;
-                            self.state.messages.push(DisplayMessage::warning(detail));
-                        }
-                        "model_connecting" => {
-                            self.state.messages.push(DisplayMessage::info(detail));
-                        }
-                        "model_ready" => {
-                            self.state.gateway_status = GatewayStatus::ModelReady;
-                            self.state.messages.push(DisplayMessage::success(detail));
-                        }
-                        "model_error" => {
-                            self.state.gateway_status = GatewayStatus::ModelError;
-                            self.state.messages.push(DisplayMessage::error(detail));
-                        }
-                        "no_model" => {
-                            self.state.messages.push(DisplayMessage::warning(detail));
-                        }
-                        "vault_locked" => {
-                            self.state.gateway_status = GatewayStatus::VaultLocked;
-                            self.state.messages.push(DisplayMessage::warning(
-                                "Gateway vault is locked — enter password to unlock.",
-                            ));
-                            return Ok(Some(Action::GatewayVaultLocked));
-                        }
-                        _ => {
-                            self.state.messages.push(DisplayMessage::system(format!("[{}] {}", status, detail)));
-                        }
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle auth challenge from gateway ───────────────
-                if frame_type == Some("auth_challenge") {
-                    self.state.gateway_status = GatewayStatus::AuthRequired;
-                    self.state.messages.push(DisplayMessage::warning(
-                        "Gateway requires 2FA authentication.",
-                    ));
-                    return Ok(Some(Action::GatewayAuthChallenge));
-                }
-
-                // ── Handle auth result from gateway ──────────────────
-                if frame_type == Some("auth_result") {
-                    let ok = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
-                        .unwrap_or(false);
-                    if ok {
-                        self.state.messages.push(DisplayMessage::success(
-                            "Authenticated with gateway.",
-                        ));
-                        // The hello + status frames will follow from the
-                        // gateway, so keep the Connecting status.
-                        self.state.gateway_status = GatewayStatus::Connected;
-                    } else {
-                        let msg = parsed
-                            .as_ref()
-                            .and_then(|v| v.get("message").and_then(|m| m.as_str()))
-                            .unwrap_or("Authentication failed.");
-                        self.state.messages.push(DisplayMessage::error(msg));
-                        self.state.gateway_status = GatewayStatus::Error;
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle auth lockout from gateway ─────────────────
-                if frame_type == Some("auth_locked") {
-                    let msg = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
-                        .unwrap_or("Too many failed attempts.");
-                    self.state.messages.push(DisplayMessage::error(msg));
-                    self.state.gateway_status = GatewayStatus::Error;
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle vault unlock result ───────────────────────
-                if frame_type == Some("vault_unlocked") {
-                    let ok = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
-                        .unwrap_or(false);
-                    if ok {
-                        self.state.messages.push(DisplayMessage::success(
-                            "Gateway vault unlocked.",
-                        ));
-                        self.state.gateway_status = GatewayStatus::Connected;
-                    } else {
-                        let msg = parsed
-                            .as_ref()
-                            .and_then(|v| v.get("message").and_then(|m| m.as_str()))
-                            .unwrap_or("Failed to unlock vault.");
-                        self.state.messages.push(DisplayMessage::error(msg));
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle tool-call frames ──────────────────────────
-                if frame_type == Some("tool_call") {
-                    let name = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("name").and_then(|n| n.as_str()))
-                        .unwrap_or("unknown");
-                    let arguments = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("arguments").and_then(|a| a.as_str()))
-                        .unwrap_or("{}");
-                    self.state.messages.push(DisplayMessage::tool_call(
-                        format!("{name}({arguments})"),
-                    ));
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle tool-result frames ────────────────────────
-                if frame_type == Some("tool_result") {
-                    let name = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("name").and_then(|n| n.as_str()))
-                        .unwrap_or("unknown");
-                    let result = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("result").and_then(|r| r.as_str()))
-                        .unwrap_or("");
-                    let is_error = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("is_error").and_then(|e| e.as_bool()))
-                        .unwrap_or(false);
-                    let prefix = if is_error { "⚠ " } else { "" };
-                    // Truncate long results for the TUI display.
-                    let display_result = if result.len() > 2000 {
-                        format!("{}{}…({} bytes)", prefix, &result[..2000], result.len())
-                    } else {
-                        format!("{prefix}{result}")
-                    };
-                    self.state.messages.push(DisplayMessage::tool_result(
-                        format!("{name}: {display_result}"),
-                    ));
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle info/notification frames ──────────────────
-                if frame_type == Some("info") {
-                    let message = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
-                        .unwrap_or("");
-                    if !message.is_empty() {
-                        self.state.messages.push(DisplayMessage::info(message));
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle streaming chunk frames ────────────────────
-                if frame_type == Some("chunk") {
-                    let delta = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("delta").and_then(|d| d.as_str()))
-                        .unwrap_or("");
-
-                    if self.streaming_response.is_none() {
-                        // First chunk — clear the loading spinner and start accumulating.
-                        self.state.loading_line = None;
-                        self.streaming_response = Some(String::new());
-                        // Only push a placeholder message if NOT in hatching mode.
-                        if !self.showing_hatching {
-                            self.state.messages.push(DisplayMessage::assistant(""));
-                        }
-                    }
-
-                    if let Some(ref mut buf) = self.streaming_response {
-                        buf.push_str(delta);
-
-                        // During hatching, just accumulate — don't push to messages.
-                        if !self.showing_hatching {
-                            // Update the last assistant message with accumulated text.
-                            if let Some(last) = self.state.messages.last_mut() {
-                                last.content = buf.clone();
-                            }
-                        }
-                    }
-
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Handle streaming-done sentinel ───────────────────
-                if frame_type == Some("response_done") {
-                    self.chat_loading_tick = None;
-                    self.state.loading_line = None;
-
-                    if let Some(buf) = self.streaming_response.take() {
-                        // During hatching, deliver the full accumulated text
-                        // to the hatching page instead of the messages pane.
-                        if self.showing_hatching {
-                            if !buf.is_empty() {
-                                if let Some(ref mut hatching) = self.hatching_page {
-                                    let mut ps = self.state.pane_state();
-                                    let _ = hatching.update(
-                                        Action::HatchingResponse(buf),
-                                        &mut ps,
-                                    );
-                                }
-                            }
-                            return Ok(Some(Action::Update));
-                        }
-
-                        // Trim trailing whitespace from the final message.
-                        let trimmed = buf.trim_end().to_string();
-                        if let Some(last) = self.state.messages.last_mut() {
-                            if matches!(last.role, crate::panes::MessageRole::Assistant) {
-                                last.content = trimmed.clone();
-                            }
-                        }
-
-                        // Record the assistant turn in conversation history
-                        // and persist to disk so future sessions remember.
-                        if !trimmed.is_empty() {
-                            self.state.conversation_history.push(ChatMessage {
-                                role: "assistant".to_string(),
-                                content: trimmed,
-                            });
-                            self.save_history();
-                        }
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // ── Extract chat response payload ────────────────────
-                let payload = parsed.as_ref().and_then(|v| {
-                    if v.get("type").and_then(|t| t.as_str()) == Some("response") {
-                        v.get("received").and_then(|r| r.as_str()).map(String::from)
-                    } else {
-                        None
-                    }
-                });
-
-                // ── Handle error frames from the gateway ─────────────
-                let is_error_frame = frame_type == Some("error");
-                let error_message = if is_error_frame {
-                    parsed
-                        .as_ref()
-                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
-                        .map(String::from)
-                } else {
-                    None
-                };
-
-                if is_error_frame {
-                    self.chat_loading_tick = None;
-                    self.state.loading_line = None;
-                    self.streaming_response = None;
-                    let msg = error_message.unwrap_or_else(|| "Unknown gateway error".to_string());
-                    self.state.messages.push(DisplayMessage::error(msg));
-                    return Ok(Some(Action::Update));
-                }
-
-                // Route gateway messages to hatching during the exchange
-                if self.showing_hatching {
-                    if let Some(content) = payload {
-                        if let Some(ref mut hatching) = self.hatching_page {
-                            let mut ps = self.state.pane_state();
-                            let _ = hatching.update(Action::HatchingResponse(content), &mut ps);
-                        }
-                    }
-                    return Ok(Some(Action::Update));
-                }
-
-                // Normal (non-hatching) messages pane display
-                let display = payload.as_deref().unwrap_or(text);
-
-                // Clear chat loading spinner
-                self.chat_loading_tick = None;
-                self.state.loading_line = None;
-
-                // Keep the full response as a single message — the messages
-                // pane renderer handles multi-line content natively.
-                self.state.messages.push(DisplayMessage::assistant(display));
-                // Auto-scroll
-                return Ok(Some(Action::Update));
+                return self.handle_gateway_message(text);
             }
             Action::GatewayAuthChallenge => {
                 // Open the TOTP code entry dialog.
@@ -1031,9 +578,9 @@ impl App {
                     "code": code,
                 });
                 self.send_to_gateway(frame.to_string()).await;
-                self.state.messages.push(DisplayMessage::info(
-                    "Sent authentication code…",
-                ));
+                self.state
+                    .messages
+                    .push(DisplayMessage::info("Sent authentication code…"));
                 return Ok(Some(Action::Update));
             }
             Action::GatewayVaultLocked => {
@@ -1050,9 +597,9 @@ impl App {
                     "password": password,
                 });
                 self.send_to_gateway(frame.to_string()).await;
-                self.state.messages.push(DisplayMessage::info(
-                    "Sent vault unlock request…",
-                ));
+                self.state
+                    .messages
+                    .push(DisplayMessage::info("Sent vault unlock request…"));
                 return Ok(Some(Action::Update));
             }
             Action::GatewayDisconnected(reason) => {
@@ -1060,7 +607,12 @@ impl App {
                 self.chat_loading_tick = None;
                 self.state.loading_line = None;
                 self.streaming_response = None;
-                self.state.messages.push(DisplayMessage::warning(format!("Gateway disconnected: {}", reason)));
+                self.state
+                    .messages
+                    .push(DisplayMessage::warning(format!(
+                        "Gateway disconnected: {}",
+                        reason
+                    )));
                 self.ws_sink = None;
                 self.reader_task = None;
                 return Ok(Some(Action::Update));
@@ -1095,9 +647,8 @@ impl App {
                 } else if let Some(ref mut tick) = self.chat_loading_tick {
                     *tick += 1;
                     let spinner = SPINNER_FRAMES[*tick % SPINNER_FRAMES.len()];
-                    self.state.loading_line = Some(format!(
-                        "  {} Waiting for model response\u{2026}", spinner,
-                    ));
+                    self.state.loading_line =
+                        Some(format!("  {} Waiting for model response\u{2026}", spinner,));
                 }
                 // Fall through so panes also get Tick
             }
@@ -1111,84 +662,36 @@ impl App {
                 return Ok(None);
             }
             Action::ShowProviderSelector => {
-                self.open_provider_selector();
+                self.provider_selector = Some(dialogs::open_provider_selector());
                 return Ok(None);
             }
             Action::SetProvider(provider) => {
-                let provider = provider.clone();
-                // Save provider to config
-                let model_cfg = self.state.config.model.get_or_insert_with(|| {
-                    crate::config::ModelProvider {
-                        provider: String::new(),
-                        model: None,
-                        base_url: None,
-                    }
-                });
-                model_cfg.provider = provider.clone();
-                if let Some(url) = providers::base_url_for_provider(&provider) {
-                    model_cfg.base_url = Some(url.to_string());
-                }
-                if let Err(e) = self.state.config.save(None) {
-                    self.state.messages.push(DisplayMessage::error(format!("Failed to save config: {}", e)));
-                } else {
-                    self.state.messages.push(DisplayMessage::success(format!("Provider set to {}.", provider)));
-                }
-                // Check auth method and proceed accordingly
-                let def = providers::provider_by_id(&provider);
-                let auth_method = def.map(|d| d.auth_method)
-                    .unwrap_or(providers::AuthMethod::ApiKey);
-
-                match auth_method {
-                    providers::AuthMethod::DeviceFlow => {
-                        if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
-                            match self.state.secrets_manager.get_secret(secret_key, true) {
-                                Ok(Some(_)) => {
-                                    self.state.messages.push(DisplayMessage::success(format!(
-                                        "Access token for {} is already stored.",
-                                        providers::display_name_for_provider(&provider),
-                                    )));
-                                    return Ok(Some(Action::FetchModels(provider)));
-                                }
-                                _ => {
-                                    return Ok(Some(Action::StartDeviceFlow(provider)));
-                                }
-                            }
-                        }
-                    }
-                    providers::AuthMethod::ApiKey => {
-                        if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
-                            match self.state.secrets_manager.get_secret(secret_key, true) {
-                                Ok(Some(_)) => {
-                                    self.state.messages.push(DisplayMessage::success(format!(
-                                        "API key for {} is already stored.",
-                                        providers::display_name_for_provider(&provider),
-                                    )));
-                                    return Ok(Some(Action::FetchModels(provider)));
-                                }
-                                _ => {
-                                    return Ok(Some(Action::PromptApiKey(provider)));
-                                }
-                            }
-                        }
-                    }
-                    providers::AuthMethod::None => {
-                        self.state.messages.push(DisplayMessage::info(format!(
-                            "{} does not require authentication.",
-                            providers::display_name_for_provider(&provider),
-                        )));
-                        return Ok(Some(Action::FetchModels(provider)));
-                    }
-                }
-                return Ok(None);
+                return self.handle_set_provider(provider.clone());
             }
             Action::PromptApiKey(provider) => {
-                return Ok(self.open_api_key_dialog(provider.clone()));
+                self.api_key_dialog =
+                    dialogs::open_api_key_dialog(provider, &mut self.state.messages);
+                return Ok(None);
             }
             Action::ConfirmStoreSecret { provider, key } => {
-                return self.handle_confirm_store_secret(provider.clone(), key.clone());
+                let action = dialogs::handle_confirm_store_secret(
+                    provider,
+                    key,
+                    &mut self.state.secrets_manager,
+                    &mut self.state.messages,
+                );
+                return Ok(action);
             }
             Action::FetchModels(provider) => {
-                self.spawn_fetch_models(provider.clone());
+                dialogs::spawn_fetch_models(
+                    provider,
+                    &mut self.state.secrets_manager,
+                    self.state.config.model.as_ref(),
+                    &mut self.state.messages,
+                    &mut self.state.loading_line,
+                    &mut self.fetch_loading,
+                    self.action_tx.clone(),
+                );
                 return Ok(None);
             }
             Action::FetchModelsFailed(msg) => {
@@ -1200,7 +703,7 @@ impl App {
             Action::ShowModelSelector { provider, models } => {
                 self.fetch_loading = None;
                 self.state.loading_line = None;
-                self.open_model_selector(provider.clone(), models.clone());
+                self.model_selector = Some(dialogs::open_model_selector(provider, models.clone()));
                 return Ok(None);
             }
             Action::StartDeviceFlow(provider) => {
@@ -1208,22 +711,22 @@ impl App {
                 return Ok(None);
             }
             Action::DeviceFlowCodeReady { url, code } => {
-                self.state.messages.push(DisplayMessage::info(
-                    "Open this URL in your browser:",
-                ));
-                self.state.messages.push(DisplayMessage::info(format!(
-                    "  ➜  {}", url,
-                )));
-                self.state.messages.push(DisplayMessage::info(format!(
-                    "Then enter this code:  {}", code,
-                )));
+                self.state
+                    .messages
+                    .push(DisplayMessage::info("Open this URL in your browser:"));
+                self.state
+                    .messages
+                    .push(DisplayMessage::info(format!("  ➜  {}", url)));
+                self.state
+                    .messages
+                    .push(DisplayMessage::info(format!("Then enter this code:  {}", code)));
                 return Ok(Some(Action::Update));
             }
             Action::DeviceFlowAuthenticated { provider, token } => {
                 self.device_flow_loading = None;
                 self.state.loading_line = None;
-                let secret_key = providers::secret_key_for_provider(provider)
-                    .unwrap_or("COPILOT_TOKEN");
+                let secret_key =
+                    providers::secret_key_for_provider(provider).unwrap_or("COPILOT_TOKEN");
                 let display = providers::display_name_for_provider(provider).to_string();
                 match self.state.secrets_manager.store_secret(secret_key, token) {
                     Ok(()) => {
@@ -1251,7 +754,9 @@ impl App {
             Action::ShowCredentialDialog { name, disabled, .. } => {
                 let has_totp = self.state.secrets_manager.has_totp();
                 // Look up the actual current policy from the vault metadata
-                let current_policy = self.state.secrets_manager
+                let current_policy = self
+                    .state
+                    .secrets_manager
                     .list_all_entries()
                     .iter()
                     .find(|(n, _)| n == name)
@@ -1282,9 +787,9 @@ impl App {
                             });
                         }
                         Err(e) => {
-                            self.state.messages.push(DisplayMessage::error(format!(
-                                "Failed to set up 2FA: {}", e,
-                            )));
+                            self.state
+                                .messages
+                                .push(DisplayMessage::error(format!("Failed to set up 2FA: {}", e)));
                         }
                     }
                 }
@@ -1298,8 +803,7 @@ impl App {
             Action::BeginHatchingExchange | Action::HatchingSendMessage(_) => {
                 // Build a structured chat request with full conversation history
                 // and send it to the gateway for model completion.
-                let messages = self.hatching_page.as_ref()
-                    .map(|h| h.chat_messages());
+                let messages = self.hatching_page.as_ref().map(|h| h.chat_messages());
                 if let Some(msgs) = messages {
                     let chat_json = self.build_hatching_chat_request(msgs);
                     self.send_to_gateway(chat_json).await;
@@ -1310,7 +814,9 @@ impl App {
                 // Save the generated identity as SOUL.md
                 let content = soul_content.clone();
                 if let Err(e) = self.state.soul_manager.set_content(content) {
-                    self.state.messages.push(DisplayMessage::error(format!("Failed to save SOUL.md: {}", e)));
+                    self.state
+                        .messages
+                        .push(DisplayMessage::error(format!("Failed to save SOUL.md: {}", e)));
                 }
                 self.showing_hatching = false;
                 self.hatching_page = None;
@@ -1343,6 +849,386 @@ impl App {
         };
 
         Ok(footer_follow.or(page_follow))
+    }
+
+    /// Handle gateway messages received from the WebSocket.
+    fn handle_gateway_message(&mut self, text: &str) -> Result<Option<Action>> {
+        // Parse the gateway JSON envelope.
+        let parsed = serde_json::from_str::<serde_json::Value>(text).ok();
+        let frame_type = parsed
+            .as_ref()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()));
+
+        // ── Handle status frames from the gateway ────────────
+        if frame_type == Some("status") {
+            let status = parsed
+                .as_ref()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()))
+                .unwrap_or("");
+            let detail = parsed
+                .as_ref()
+                .and_then(|v| v.get("detail").and_then(|d| d.as_str()))
+                .unwrap_or("");
+
+            match status {
+                "model_configured" => {
+                    self.state
+                        .messages
+                        .push(DisplayMessage::info(format!("Model: {}", detail)));
+                }
+                "credentials_loaded" => {
+                    self.state.messages.push(DisplayMessage::info(detail));
+                }
+                "credentials_missing" => {
+                    self.state.gateway_status = GatewayStatus::ModelError;
+                    self.state.messages.push(DisplayMessage::warning(detail));
+                }
+                "model_connecting" => {
+                    self.state.messages.push(DisplayMessage::info(detail));
+                }
+                "model_ready" => {
+                    self.state.gateway_status = GatewayStatus::ModelReady;
+                    self.state.messages.push(DisplayMessage::success(detail));
+                }
+                "model_error" => {
+                    self.state.gateway_status = GatewayStatus::ModelError;
+                    self.state.messages.push(DisplayMessage::error(detail));
+                }
+                "no_model" => {
+                    self.state.messages.push(DisplayMessage::warning(detail));
+                }
+                "vault_locked" => {
+                    self.state.gateway_status = GatewayStatus::VaultLocked;
+                    self.state.messages.push(DisplayMessage::warning(
+                        "Gateway vault is locked — enter password to unlock.",
+                    ));
+                    return Ok(Some(Action::GatewayVaultLocked));
+                }
+                _ => {
+                    self.state
+                        .messages
+                        .push(DisplayMessage::system(format!("[{}] {}", status, detail)));
+                }
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle auth challenge from gateway ───────────────
+        if frame_type == Some("auth_challenge") {
+            self.state.gateway_status = GatewayStatus::AuthRequired;
+            self.state
+                .messages
+                .push(DisplayMessage::warning("Gateway requires 2FA authentication."));
+            return Ok(Some(Action::GatewayAuthChallenge));
+        }
+
+        // ── Handle auth result from gateway ──────────────────
+        if frame_type == Some("auth_result") {
+            let ok = parsed
+                .as_ref()
+                .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+                .unwrap_or(false);
+            if ok {
+                self.state
+                    .messages
+                    .push(DisplayMessage::success("Authenticated with gateway."));
+                // The hello + status frames will follow from the
+                // gateway, so keep the Connecting status.
+                self.state.gateway_status = GatewayStatus::Connected;
+            } else {
+                let msg = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                    .unwrap_or("Authentication failed.");
+                self.state.messages.push(DisplayMessage::error(msg));
+                self.state.gateway_status = GatewayStatus::Error;
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle auth lockout from gateway ─────────────────
+        if frame_type == Some("auth_locked") {
+            let msg = parsed
+                .as_ref()
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                .unwrap_or("Too many failed attempts.");
+            self.state.messages.push(DisplayMessage::error(msg));
+            self.state.gateway_status = GatewayStatus::Error;
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle vault unlock result ───────────────────────
+        if frame_type == Some("vault_unlocked") {
+            let ok = parsed
+                .as_ref()
+                .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+                .unwrap_or(false);
+            if ok {
+                self.state
+                    .messages
+                    .push(DisplayMessage::success("Gateway vault unlocked."));
+                self.state.gateway_status = GatewayStatus::Connected;
+            } else {
+                let msg = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                    .unwrap_or("Failed to unlock vault.");
+                self.state.messages.push(DisplayMessage::error(msg));
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle tool-call frames ──────────────────────────
+        if frame_type == Some("tool_call") {
+            let name = parsed
+                .as_ref()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()))
+                .unwrap_or("unknown");
+            let arguments = parsed
+                .as_ref()
+                .and_then(|v| v.get("arguments").and_then(|a| a.as_str()))
+                .unwrap_or("{}");
+            self.state
+                .messages
+                .push(DisplayMessage::tool_call(format!("{name}({arguments})")));
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle tool-result frames ────────────────────────
+        if frame_type == Some("tool_result") {
+            let name = parsed
+                .as_ref()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()))
+                .unwrap_or("unknown");
+            let result = parsed
+                .as_ref()
+                .and_then(|v| v.get("result").and_then(|r| r.as_str()))
+                .unwrap_or("");
+            let is_error = parsed
+                .as_ref()
+                .and_then(|v| v.get("is_error").and_then(|e| e.as_bool()))
+                .unwrap_or(false);
+            let prefix = if is_error { "⚠ " } else { "" };
+            // Truncate long results for the TUI display.
+            let display_result = if result.len() > 2000 {
+                format!("{}{}…({} bytes)", prefix, &result[..2000], result.len())
+            } else {
+                format!("{prefix}{result}")
+            };
+            self.state
+                .messages
+                .push(DisplayMessage::tool_result(format!("{name}: {display_result}")));
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle info/notification frames ──────────────────
+        if frame_type == Some("info") {
+            let message = parsed
+                .as_ref()
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                .unwrap_or("");
+            if !message.is_empty() {
+                self.state.messages.push(DisplayMessage::info(message));
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle streaming chunk frames ────────────────────
+        if frame_type == Some("chunk") {
+            let delta = parsed
+                .as_ref()
+                .and_then(|v| v.get("delta").and_then(|d| d.as_str()))
+                .unwrap_or("");
+
+            if self.streaming_response.is_none() {
+                // First chunk — clear the loading spinner and start accumulating.
+                self.state.loading_line = None;
+                self.streaming_response = Some(String::new());
+                // Only push a placeholder message if NOT in hatching mode.
+                if !self.showing_hatching {
+                    self.state.messages.push(DisplayMessage::assistant(""));
+                }
+            }
+
+            if let Some(ref mut buf) = self.streaming_response {
+                buf.push_str(delta);
+
+                // During hatching, just accumulate — don't push to messages.
+                if !self.showing_hatching {
+                    // Update the last assistant message with accumulated text.
+                    if let Some(last) = self.state.messages.last_mut() {
+                        last.content = buf.clone();
+                    }
+                }
+            }
+
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Handle streaming-done sentinel ───────────────────
+        if frame_type == Some("response_done") {
+            self.chat_loading_tick = None;
+            self.state.loading_line = None;
+
+            if let Some(buf) = self.streaming_response.take() {
+                // During hatching, deliver the full accumulated text
+                // to the hatching page instead of the messages pane.
+                if self.showing_hatching {
+                    if !buf.is_empty() {
+                        if let Some(ref mut hatching) = self.hatching_page {
+                            let mut ps = self.state.pane_state();
+                            let _ = hatching.update(Action::HatchingResponse(buf), &mut ps);
+                        }
+                    }
+                    return Ok(Some(Action::Update));
+                }
+
+                // Trim trailing whitespace from the final message.
+                let trimmed = buf.trim_end().to_string();
+                if let Some(last) = self.state.messages.last_mut() {
+                    if matches!(last.role, crate::panes::MessageRole::Assistant) {
+                        last.content = trimmed.clone();
+                    }
+                }
+
+                // Record the assistant turn in conversation history
+                // and persist to disk so future sessions remember.
+                if !trimmed.is_empty() {
+                    self.state.conversation_history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: trimmed,
+                    });
+                    self.save_history();
+                }
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // ── Extract chat response payload ────────────────────
+        let payload = parsed.as_ref().and_then(|v| {
+            if v.get("type").and_then(|t| t.as_str()) == Some("response") {
+                v.get("received").and_then(|r| r.as_str()).map(String::from)
+            } else {
+                None
+            }
+        });
+
+        // ── Handle error frames from the gateway ─────────────
+        let is_error_frame = frame_type == Some("error");
+        let error_message = if is_error_frame {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                .map(String::from)
+        } else {
+            None
+        };
+
+        if is_error_frame {
+            self.chat_loading_tick = None;
+            self.state.loading_line = None;
+            self.streaming_response = None;
+            let msg = error_message.unwrap_or_else(|| "Unknown gateway error".to_string());
+            self.state.messages.push(DisplayMessage::error(msg));
+            return Ok(Some(Action::Update));
+        }
+
+        // Route gateway messages to hatching during the exchange
+        if self.showing_hatching {
+            if let Some(content) = payload {
+                if let Some(ref mut hatching) = self.hatching_page {
+                    let mut ps = self.state.pane_state();
+                    let _ = hatching.update(Action::HatchingResponse(content), &mut ps);
+                }
+            }
+            return Ok(Some(Action::Update));
+        }
+
+        // Normal (non-hatching) messages pane display
+        let display = payload.as_deref().unwrap_or(text);
+
+        // Clear chat loading spinner
+        self.chat_loading_tick = None;
+        self.state.loading_line = None;
+
+        // Keep the full response as a single message — the messages
+        // pane renderer handles multi-line content natively.
+        self.state.messages.push(DisplayMessage::assistant(display));
+        // Auto-scroll
+        Ok(Some(Action::Update))
+    }
+
+    /// Handle SetProvider action.
+    fn handle_set_provider(&mut self, provider: String) -> Result<Option<Action>> {
+        // Save provider to config
+        let model_cfg = self.state.config.model.get_or_insert_with(|| {
+            crate::config::ModelProvider {
+                provider: String::new(),
+                model: None,
+                base_url: None,
+            }
+        });
+        model_cfg.provider = provider.clone();
+        if let Some(url) = providers::base_url_for_provider(&provider) {
+            model_cfg.base_url = Some(url.to_string());
+        }
+        if let Err(e) = self.state.config.save(None) {
+            self.state
+                .messages
+                .push(DisplayMessage::error(format!("Failed to save config: {}", e)));
+        } else {
+            self.state
+                .messages
+                .push(DisplayMessage::success(format!("Provider set to {}.", provider)));
+        }
+        // Check auth method and proceed accordingly
+        let def = providers::provider_by_id(&provider);
+        let auth_method = def
+            .map(|d| d.auth_method)
+            .unwrap_or(providers::AuthMethod::ApiKey);
+
+        match auth_method {
+            providers::AuthMethod::DeviceFlow => {
+                if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
+                    match self.state.secrets_manager.get_secret(secret_key, true) {
+                        Ok(Some(_)) => {
+                            self.state.messages.push(DisplayMessage::success(format!(
+                                "Access token for {} is already stored.",
+                                providers::display_name_for_provider(&provider),
+                            )));
+                            return Ok(Some(Action::FetchModels(provider)));
+                        }
+                        _ => {
+                            return Ok(Some(Action::StartDeviceFlow(provider)));
+                        }
+                    }
+                }
+            }
+            providers::AuthMethod::ApiKey => {
+                if let Some(secret_key) = providers::secret_key_for_provider(&provider) {
+                    match self.state.secrets_manager.get_secret(secret_key, true) {
+                        Ok(Some(_)) => {
+                            self.state.messages.push(DisplayMessage::success(format!(
+                                "API key for {} is already stored.",
+                                providers::display_name_for_provider(&provider),
+                            )));
+                            return Ok(Some(Action::FetchModels(provider)));
+                        }
+                        _ => {
+                            return Ok(Some(Action::PromptApiKey(provider)));
+                        }
+                    }
+                }
+            }
+            providers::AuthMethod::None => {
+                self.state.messages.push(DisplayMessage::info(format!(
+                    "{} does not require authentication.",
+                    providers::display_name_for_provider(&provider),
+                )));
+                return Ok(Some(Action::FetchModels(provider)));
+            }
+        }
+        Ok(None)
     }
 
     /// Process submitted input — either a /command or a plain prompt.
@@ -1423,9 +1309,13 @@ impl App {
                     });
                     model_cfg.model = Some(model.clone());
                     if let Err(e) = self.state.config.save(None) {
-                        self.state.messages.push(DisplayMessage::error(format!("Failed to save config: {}", e)));
+                        self.state
+                            .messages
+                            .push(DisplayMessage::error(format!("Failed to save config: {}", e)));
                     } else {
-                        self.state.messages.push(DisplayMessage::success(format!("Model set to {}.", model)));
+                        self.state
+                            .messages
+                            .push(DisplayMessage::success(format!("Model set to {}.", model)));
                     }
                     // Restart the gateway so it picks up the new model.
                     return Ok(Some(Action::RestartGateway));
@@ -1452,8 +1342,10 @@ impl App {
             // the gateway recognises it as a model call rather than echoing
             // the raw text back.
             self.state.messages.push(DisplayMessage::user(&text));
-            if matches!(self.state.gateway_status, GatewayStatus::Connected | GatewayStatus::ModelReady)
-                && self.ws_sink.is_some()
+            if matches!(
+                self.state.gateway_status,
+                GatewayStatus::Connected | GatewayStatus::ModelReady
+            ) && self.ws_sink.is_some()
             {
                 // Append the new user turn to the running conversation history.
                 self.state.conversation_history.push(ChatMessage {
@@ -1469,9 +1361,8 @@ impl App {
                 .to_string();
                 self.chat_loading_tick = Some(0);
                 let spinner = SPINNER_FRAMES[0];
-                self.state.loading_line = Some(format!(
-                    "  {} Waiting for model response\u{2026}", spinner,
-                ));
+                self.state.loading_line =
+                    Some(format!("  {} Waiting for model response\u{2026}", spinner,));
                 return Ok(Some(Action::SendToGateway(chat_json)));
             }
             self.state
@@ -1481,11 +1372,148 @@ impl App {
         }
     }
 
+    // ── Dialog key handlers ─────────────────────────────────────────────────
+
+    /// Handle key events when the API key dialog is open.
+    fn handle_api_key_dialog_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(dialog) = self.api_key_dialog.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) =
+            dialogs::handle_api_key_dialog_key(dialog, code, &mut self.state.messages);
+        self.api_key_dialog = new_state;
+        action
+    }
+
+    /// Handle key events when the provider selector dialog is open.
+    fn handle_provider_selector_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(sel) = self.provider_selector.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) =
+            dialogs::handle_provider_selector_key(sel, code, &mut self.state.messages);
+        self.provider_selector = new_state;
+        action
+    }
+
+    /// Handle key events when the model selector dialog is open.
+    fn handle_model_selector_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(sel) = self.model_selector.take() else {
+            return Action::Noop;
+        };
+        // Create a no-op save function - we'll save after the dialog function returns
+        let save_fn = || -> Result<(), String> { Ok(()) };
+        let (new_state, action) = dialogs::handle_model_selector_key(
+            sel,
+            code,
+            &mut self.state.config.model,
+            &mut self.state.messages,
+            save_fn,
+        );
+        // Now save if Enter was pressed (action is RestartGateway)
+        if matches!(action, Action::RestartGateway) {
+            if let Err(e) = self.state.config.save(None) {
+                // Replace the success message with an error
+                if let Some(msg) = self.state.messages.last_mut() {
+                    *msg = DisplayMessage::error(format!("Failed to save config: {}", e));
+                }
+            }
+        }
+        self.model_selector = new_state;
+        action
+    }
+
+    /// Handle key events when the policy picker dialog is open.
+    fn handle_policy_picker_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(picker) = self.policy_picker.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) = dialogs::handle_policy_picker_key(
+            picker,
+            code,
+            &mut self.state.secrets_manager,
+            &mut self.state.messages,
+        );
+        self.policy_picker = new_state;
+        action
+    }
+
+    /// Handle key events when the secret viewer dialog is open.
+    fn handle_secret_viewer_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(viewer) = self.secret_viewer.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) = dialogs::handle_secret_viewer_key(viewer, code);
+        self.secret_viewer = new_state;
+        action
+    }
+
+    /// Handle key events when the credential dialog is open.
+    fn handle_credential_dialog_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(dlg) = self.credential_dialog.take() else {
+            return Action::Noop;
+        };
+        let (new_dlg, new_picker, new_viewer, action) = dialogs::handle_credential_dialog_key(
+            dlg,
+            code,
+            &mut self.state.secrets_manager,
+            &mut self.state.messages,
+        );
+        self.credential_dialog = new_dlg;
+        if new_picker.is_some() {
+            self.policy_picker = new_picker;
+        }
+        if new_viewer.is_some() {
+            self.secret_viewer = new_viewer;
+        }
+        action
+    }
+
+    /// Handle key events when the TOTP dialog is open.
+    fn handle_totp_dialog_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(dlg) = self.totp_dialog.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) = dialogs::handle_totp_dialog_key(
+            dlg,
+            code,
+            &mut self.state.secrets_manager,
+            &mut self.state.config,
+            &mut self.state.messages,
+        );
+        self.totp_dialog = new_state;
+        action
+    }
+
+    /// Handle key events when the gateway auth prompt is open.
+    fn handle_auth_prompt_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(prompt) = self.auth_prompt.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) = dialogs::handle_auth_prompt_key(
+            prompt,
+            code,
+            &mut self.state.messages,
+            &mut self.state.gateway_status,
+        );
+        self.auth_prompt = new_state;
+        action
+    }
+
+    /// Handle key events when the vault unlock prompt is open.
+    fn handle_vault_unlock_prompt_key(&mut self, code: crossterm::event::KeyCode) -> Action {
+        let Some(prompt) = self.vault_unlock_prompt.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) =
+            dialogs::handle_vault_unlock_prompt_key(prompt, code, &mut self.state.messages);
+        self.vault_unlock_prompt = new_state;
+        action
+    }
+
+    // ── Gateway connection ──────────────────────────────────────────────────
+
     /// Ensure the gateway daemon is running, then connect to it.
-    ///
-    /// If a daemon is already running, we just connect.  Otherwise we
-    /// launch one via `daemon::start()`, passing the API key from the
-    /// secrets vault so the daemon never needs vault access.
     async fn start_gateway(&mut self) {
         let (port, bind) = Self::gateway_defaults(&self.state.config);
         let url = self
@@ -1509,14 +1537,16 @@ impl App {
         match daemon::status(&self.state.config.settings_dir) {
             daemon::DaemonStatus::Running { pid } => {
                 self.state.messages.push(DisplayMessage::info(format!(
-                    "Gateway daemon already running (PID {}).", pid,
+                    "Gateway daemon already running (PID {}).",
+                    pid,
                 )));
             }
             _ => {
                 // Save config first so the daemon reads current values.
                 if let Err(e) = self.state.config.save(None) {
                     self.state.messages.push(DisplayMessage::warning(format!(
-                        "Warning: could not save config: {}", e,
+                        "Warning: could not save config: {}",
+                        e,
                     )));
                 }
 
@@ -1524,7 +1554,8 @@ impl App {
                 let vault_password = self.extract_vault_password();
 
                 self.state.messages.push(DisplayMessage::info(format!(
-                    "Starting gateway daemon on {}…", url,
+                    "Starting gateway daemon on {}…",
+                    url,
                 )));
                 match daemon::start(
                     &self.state.config.settings_dir,
@@ -1536,14 +1567,15 @@ impl App {
                 ) {
                     Ok(pid) => {
                         self.state.messages.push(DisplayMessage::success(format!(
-                            "Gateway daemon started (PID {}).", pid,
+                            "Gateway daemon started (PID {}).",
+                            pid,
                         )));
                     }
                     Err(e) => {
                         self.state.gateway_status = GatewayStatus::Error;
-                        self.state.messages.push(DisplayMessage::error(format!(
-                            "Failed to start gateway: {}", e,
-                        )));
+                        self.state
+                            .messages
+                            .push(DisplayMessage::error(format!("Failed to start gateway: {}", e)));
                         return;
                     }
                 }
@@ -1578,9 +1610,10 @@ impl App {
             }
             Err(err) => {
                 self.state.gateway_status = GatewayStatus::Error;
-                self.state
-                    .messages
-                    .push(DisplayMessage::error(format!("Gateway connection failed: {}", err)));
+                self.state.messages.push(DisplayMessage::error(format!(
+                    "Gateway connection failed: {}",
+                    err
+                )));
             }
         }
     }
@@ -1614,39 +1647,256 @@ impl App {
         }
     }
 
-    /// Build a structured JSON chat request for the hatching exchange.
-    ///
-    /// The request includes the full conversation history (system prompt +
-    /// all user/assistant turns).  The gateway owns the model configuration
-    /// and API credentials — resolved at startup from config + secrets vault
-    /// — so the client only needs to send the messages.
-    fn build_hatching_chat_request(
-        &mut self,
-        messages: Vec<crate::gateway::ChatMessage>,
-    ) -> String {
-        serde_json::json!({
-            "type": "chat",
-            "messages": messages,
-        })
-        .to_string()
+    /// Send a text message to the gateway over the open WebSocket connection.
+    async fn send_to_gateway(&mut self, text: String) {
+        if let Some(ref mut sink) = self.ws_sink {
+            match sink.send(Message::Text(text.into())).await {
+                Ok(()) => {}
+                Err(err) => {
+                    self.chat_loading_tick = None;
+                    self.state.loading_line = None;
+                    self.streaming_response = None;
+                    self.state
+                        .messages
+                        .push(DisplayMessage::error(format!("Send failed: {}", err)));
+                    self.state.gateway_status = GatewayStatus::Error;
+                    self.ws_sink = None;
+                }
+            }
+        } else {
+            self.state
+                .messages
+                .push(DisplayMessage::warning("Cannot send: gateway not connected."));
+        }
     }
 
-    // ── Conversation history helpers ────────────────────────────────────
+    /// Stop the gateway: disconnect the client and stop the daemon.
+    async fn stop_gateway(&mut self) {
+        let had_connection = self.ws_sink.is_some();
+
+        // Abort the reader task first so it doesn't fire a disconnect action.
+        if let Some(handle) = self.reader_task.take() {
+            handle.abort();
+        }
+
+        // Close the client-side WebSocket gracefully.
+        if let Some(mut sink) = self.ws_sink.take() {
+            let _ = sink.send(Message::Close(None)).await;
+            let _ = sink.close().await;
+        }
+
+        // Stop the daemon process.
+        let daemon_stopped = match daemon::stop(&self.state.config.settings_dir) {
+            Ok(daemon::StopResult::Stopped { pid }) => {
+                self.state.messages.push(DisplayMessage::info(format!(
+                    "Gateway daemon stopped (was PID {}).",
+                    pid,
+                )));
+                true
+            }
+            Ok(daemon::StopResult::WasStale { pid }) => {
+                self.state.messages.push(DisplayMessage::warning(format!(
+                    "Cleaned up stale PID file (PID {}).",
+                    pid,
+                )));
+                false
+            }
+            Ok(daemon::StopResult::WasNotRunning) => false,
+            Err(e) => {
+                self.state.messages.push(DisplayMessage::warning(format!(
+                    "Warning: could not stop daemon: {}",
+                    e,
+                )));
+                false
+            }
+        };
+
+        if had_connection || daemon_stopped {
+            self.state.gateway_status = GatewayStatus::Disconnected;
+            if !daemon_stopped {
+                self.state
+                    .messages
+                    .push(DisplayMessage::info("Disconnected from gateway."));
+            }
+        } else {
+            self.state
+                .messages
+                .push(DisplayMessage::info("Gateway is not running."));
+        }
+    }
+
+    /// Restart: stop the daemon, start a fresh one, reconnect.
+    async fn restart_gateway(&mut self) {
+        self.stop_gateway().await;
+
+        // Brief pause so the OS releases the port and the TUI can
+        // render the Disconnected status.
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let _ = tx.send(Action::ReconnectGateway);
+        });
+    }
+
+    /// Extract the API key for the currently configured model provider
+    /// from the secrets vault.
+    fn extract_model_api_key(&mut self) -> Option<String> {
+        let provider_id = self
+            .state
+            .config
+            .model
+            .as_ref()
+            .map(|m| m.provider.as_str())?;
+        let key_name = providers::secret_key_for_provider(provider_id)?;
+        self.state
+            .secrets_manager
+            .get_secret(key_name, true)
+            .ok()
+            .flatten()
+    }
+
+    /// Extract the vault password to pass to the gateway daemon.
+    fn extract_vault_password(&self) -> Option<String> {
+        if !self.state.config.secrets_password_protected {
+            return None;
+        }
+        self.state
+            .secrets_manager
+            .password()
+            .map(|s| s.to_string())
+    }
+
+    /// Parse port and bind mode from the config's gateway URL.
+    fn gateway_defaults(config: &Config) -> (u16, &'static str) {
+        if let Some(url) = &config.gateway_url {
+            if let Ok(parsed) = url::Url::parse(url) {
+                let port = parsed.port().unwrap_or(9001);
+                let host = parsed.host_str().unwrap_or("127.0.0.1");
+                let bind = if host == "0.0.0.0" { "lan" } else { "loopback" };
+                return (port, bind);
+            }
+        }
+        (9001, "loopback")
+    }
+
+    // ── Device flow authentication ──────────────────────────────────────────
+
+    /// Spawn a background task to perform OAuth device flow authentication.
+    fn spawn_device_flow(&mut self, provider: String) {
+        let def = match providers::provider_by_id(&provider) {
+            Some(d) => d,
+            None => {
+                self.state
+                    .messages
+                    .push(DisplayMessage::error(format!("Unknown provider: {}", provider)));
+                return;
+            }
+        };
+
+        let device_config = match def.device_flow {
+            Some(cfg) => cfg,
+            None => {
+                self.state.messages.push(DisplayMessage::warning(format!(
+                    "{} does not support device flow authentication.",
+                    def.display,
+                )));
+                return;
+            }
+        };
+
+        let display = def.display.to_string();
+        self.state.messages.push(DisplayMessage::info(format!(
+            "Authenticating with {}…",
+            display,
+        )));
+
+        // Show the inline loading line
+        let spinner = SPINNER_FRAMES[0];
+        self.state.loading_line = Some(format!(
+            "  {} Starting {} authentication…",
+            spinner, display,
+        ));
+        self.device_flow_loading = Some(FetchModelsLoading {
+            display: display.clone(),
+            tick: 0,
+        });
+
+        let tx = self.action_tx.clone();
+        let provider_clone = provider.clone();
+        let device_cfg: &'static providers::DeviceFlowConfig = device_config;
+
+        tokio::spawn(async move {
+            // Step 1: Start the device flow
+            let auth = match providers::start_device_flow(device_cfg).await {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tx.send(Action::DeviceFlowFailed(format!(
+                        "Failed to start device flow: {}",
+                        e,
+                    )));
+                    return;
+                }
+            };
+
+            // Step 2: Show the URL and code to the user via messages
+            let _ = tx.send(Action::DeviceFlowCodeReady {
+                url: auth.verification_uri.clone(),
+                code: auth.user_code.clone(),
+            });
+
+            // Step 3: Poll for the token
+            let interval = std::time::Duration::from_secs(auth.interval.max(5));
+            let max_attempts = (auth.expires_in / interval.as_secs()).max(10);
+
+            for _ in 0..max_attempts {
+                tokio::time::sleep(interval).await;
+
+                match providers::poll_device_token(device_cfg, &auth.device_code).await {
+                    Ok(Some(token)) => {
+                        let _ = tx.send(Action::DeviceFlowAuthenticated {
+                            provider: provider_clone,
+                            token,
+                        });
+                        return;
+                    }
+                    Ok(None) => {
+                        // Still pending — keep polling
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Action::DeviceFlowFailed(format!(
+                            "Authentication failed: {}",
+                            e,
+                        )));
+                        return;
+                    }
+                }
+            }
+
+            let _ = tx.send(Action::DeviceFlowFailed(
+                "Authentication timed out. Please try again with /provider.".to_string(),
+            ));
+        });
+    }
+
+    // ── Conversation history helpers ────────────────────────────────────────
 
     /// Path to the persisted conversation history file.
     fn history_path(config: &Config) -> std::path::PathBuf {
-        config.settings_dir.join("conversations").join("current.json")
+        config
+            .settings_dir
+            .join("conversations")
+            .join("current.json")
     }
 
     /// Build the system prompt from SOUL.md.
     fn system_message(soul: &SoulManager, skill_manager: &SkillManager) -> Option<ChatMessage> {
         let mut content = String::new();
-        
+
         // Add SOUL.md content
         if let Some(soul_text) = soul.get_content() {
             content.push_str(soul_text);
         }
-        
+
         // Add skills context
         let skills_context = skill_manager.generate_prompt_context();
         if !skills_context.is_empty() {
@@ -1655,7 +1905,7 @@ impl App {
             }
             content.push_str(&skills_context);
         }
-        
+
         if content.is_empty() {
             None
         } else {
@@ -1667,7 +1917,11 @@ impl App {
     }
 
     /// Load conversation history from disk, prepending the system prompt.
-    fn load_history(path: &std::path::Path, soul: &SoulManager, skill_manager: &SkillManager) -> Vec<ChatMessage> {
+    fn load_history(
+        path: &std::path::Path,
+        soul: &SoulManager,
+        skill_manager: &SkillManager,
+    ) -> Vec<ChatMessage> {
         let mut history = Vec::new();
 
         // Always lead with the system prompt.
@@ -1709,134 +1963,28 @@ impl App {
     /// the system prompt.
     fn clear_history(&mut self) {
         self.state.conversation_history.clear();
-        if let Some(sys) = Self::system_message(&self.state.soul_manager, &self.state.skill_manager) {
+        if let Some(sys) =
+            Self::system_message(&self.state.soul_manager, &self.state.skill_manager)
+        {
             self.state.conversation_history.push(sys);
         }
         let path = Self::history_path(&self.state.config);
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Send a text message to the gateway over the open WebSocket connection.
-    async fn send_to_gateway(&mut self, text: String) {
-        if let Some(ref mut sink) = self.ws_sink {
-            match sink.send(Message::Text(text.into())).await {
-                Ok(()) => {}
-                Err(err) => {
-                    self.chat_loading_tick = None;
-                    self.state.loading_line = None;
-                    self.streaming_response = None;
-                    self.state.messages.push(DisplayMessage::error(format!("Send failed: {}", err)));
-                    self.state.gateway_status = GatewayStatus::Error;
-                    self.ws_sink = None;
-                }
-            }
-        } else {
-            self.state
-                .messages
-                .push(DisplayMessage::warning("Cannot send: gateway not connected."));
-        }
+    /// Build a structured JSON chat request for the hatching exchange.
+    fn build_hatching_chat_request(
+        &mut self,
+        messages: Vec<crate::gateway::ChatMessage>,
+    ) -> String {
+        serde_json::json!({
+            "type": "chat",
+            "messages": messages,
+        })
+        .to_string()
     }
 
-    /// Stop the gateway: disconnect the client and stop the daemon.
-    async fn stop_gateway(&mut self) {
-        let had_connection = self.ws_sink.is_some();
-
-        // Abort the reader task first so it doesn't fire a disconnect action.
-        if let Some(handle) = self.reader_task.take() {
-            handle.abort();
-        }
-
-        // Close the client-side WebSocket gracefully.
-        if let Some(mut sink) = self.ws_sink.take() {
-            let _ = sink.send(Message::Close(None)).await;
-            let _ = sink.close().await;
-        }
-
-        // Stop the daemon process.
-        let daemon_stopped = match daemon::stop(&self.state.config.settings_dir) {
-            Ok(daemon::StopResult::Stopped { pid }) => {
-                self.state.messages.push(DisplayMessage::info(format!(
-                    "Gateway daemon stopped (was PID {}).", pid,
-                )));
-                true
-            }
-            Ok(daemon::StopResult::WasStale { pid }) => {
-                self.state.messages.push(DisplayMessage::warning(format!(
-                    "Cleaned up stale PID file (PID {}).", pid,
-                )));
-                false
-            }
-            Ok(daemon::StopResult::WasNotRunning) => false,
-            Err(e) => {
-                self.state.messages.push(DisplayMessage::warning(format!(
-                    "Warning: could not stop daemon: {}", e,
-                )));
-                false
-            }
-        };
-
-        if had_connection || daemon_stopped {
-            self.state.gateway_status = GatewayStatus::Disconnected;
-            if !daemon_stopped {
-                self.state.messages.push(DisplayMessage::info("Disconnected from gateway."));
-            }
-        } else {
-            self.state
-                .messages
-                .push(DisplayMessage::info("Gateway is not running."));
-        }
-    }
-
-    /// Restart: stop the daemon, start a fresh one, reconnect.
-    ///
-    /// Saves the current config first so the new daemon picks up any
-    /// changes (e.g. `/model` or `/provider`).
-    async fn restart_gateway(&mut self) {
-        self.stop_gateway().await;
-
-        // Brief pause so the OS releases the port and the TUI can
-        // render the Disconnected status.
-        let tx = self.action_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let _ = tx.send(Action::ReconnectGateway);
-        });
-    }
-
-    /// Extract the API key for the currently configured model provider
-    /// from the secrets vault.  Returns `None` if no key is needed or
-    /// the vault lookup fails.
-    fn extract_model_api_key(&mut self) -> Option<String> {
-        let provider_id = self.state.config.model.as_ref()
-            .map(|m| m.provider.as_str())?;
-        let key_name = providers::secret_key_for_provider(provider_id)?;
-        self.state.secrets_manager.get_secret(key_name, true).ok().flatten()
-    }
-
-    /// Extract the vault password to pass to the gateway daemon.
-    ///
-    /// If the TUI's `SecretsManager` was constructed with a password
-    /// (during onboarding or CLI launch), return it so the daemon can
-    /// open the vault without prompting.
-    fn extract_vault_password(&self) -> Option<String> {
-        if !self.state.config.secrets_password_protected {
-            return None;
-        }
-        self.state.secrets_manager.password().map(|s| s.to_string())
-    }
-
-    /// Parse port and bind mode from the config's gateway URL.
-    fn gateway_defaults(config: &Config) -> (u16, &'static str) {
-        if let Some(url) = &config.gateway_url {
-            if let Ok(parsed) = url::Url::parse(url) {
-                let port = parsed.port().unwrap_or(9001);
-                let host = parsed.host_str().unwrap_or("127.0.0.1");
-                let bind = if host == "0.0.0.0" { "lan" } else { "loopback" };
-                return (port, bind);
-            }
-        }
-        (9001, "loopback")
-    }
+    // ── Drawing ─────────────────────────────────────────────────────────────
 
     fn draw(&mut self, tui: &mut Tui) -> Result<()> {
         tui.draw(|frame| {
@@ -1882,54 +2030,52 @@ impl App {
 
             // Secrets dialog overlay
             if self.show_secrets_dialog {
-                Self::draw_secrets_dialog(
-                    frame, area, &mut ps, self.secrets_scroll,
-                );
+                Self::draw_secrets_dialog(frame, area, &mut ps, self.secrets_scroll);
             }
 
             // API key dialog overlay
             if let Some(ref dialog) = self.api_key_dialog {
-                Self::draw_api_key_dialog(frame, area, dialog);
+                dialogs::draw_api_key_dialog(frame, area, dialog);
             }
 
             // Provider selector dialog overlay
             if let Some(ref selector) = self.provider_selector {
-                Self::draw_provider_selector_dialog(frame, area, selector);
+                dialogs::draw_provider_selector_dialog(frame, area, selector);
             }
 
             // Model selector dialog overlay
             if let Some(ref selector) = self.model_selector {
-                Self::draw_model_selector_dialog(frame, area, selector);
+                dialogs::draw_model_selector_dialog(frame, area, selector);
             }
 
             // Credential management dialog overlay
             if let Some(ref dialog) = self.credential_dialog {
-                Self::draw_credential_dialog(frame, area, dialog);
+                dialogs::draw_credential_dialog(frame, area, dialog);
             }
 
             // Policy picker dialog overlay
             if let Some(ref picker) = self.policy_picker {
-                Self::draw_policy_picker(frame, area, picker);
+                dialogs::draw_policy_picker(frame, area, picker);
             }
 
             // TOTP setup dialog overlay
             if let Some(ref dialog) = self.totp_dialog {
-                Self::draw_totp_dialog(frame, area, dialog);
+                dialogs::draw_totp_dialog(frame, area, dialog);
             }
 
             // Gateway auth prompt overlay (TOTP code entry)
             if let Some(ref prompt) = self.auth_prompt {
-                Self::draw_auth_prompt(frame, area, prompt);
+                dialogs::draw_auth_prompt(frame, area, prompt);
             }
 
             // Vault unlock prompt overlay (password entry)
             if let Some(ref prompt) = self.vault_unlock_prompt {
-                Self::draw_vault_unlock_prompt(frame, area, prompt);
+                dialogs::draw_vault_unlock_prompt(frame, area, prompt);
             }
 
             // Secret viewer dialog overlay
             if let Some(ref viewer) = self.secret_viewer {
-                Self::draw_secret_viewer(frame, area, viewer);
+                dialogs::draw_secret_viewer(frame, area, viewer);
             }
         })?;
         Ok(())
@@ -1944,7 +2090,9 @@ impl App {
 
         // Size the dialog: width ~60 or 80% of screen, height = skills + 4 (border + header + hint)
         let dialog_w = 60.min(area.width.saturating_sub(4));
-        let dialog_h = ((skills.len() as u16) + 4).min(area.height.saturating_sub(4)).max(6);
+        let dialog_h = ((skills.len() as u16) + 4)
+            .min(area.height.saturating_sub(4))
+            .max(6);
         let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
         let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
         let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
@@ -1990,10 +2138,7 @@ impl App {
         let list = List::new(all_items)
             .block(
                 Block::default()
-                    .title(Span::styled(
-                        " Skills ",
-                        tp::title_focused(),
-                    ))
+                    .title(Span::styled(" Skills ", tp::title_focused()))
                     .title_bottom(
                         Line::from(Span::styled(
                             " Esc to close ",
@@ -2027,7 +2172,9 @@ impl App {
 
         // Size: 70 cols or 90% width, height = creds + header lines + border
         let dialog_w = 70.min(area.width.saturating_sub(4));
-        let dialog_h = ((creds.len() as u16) + 8).min(area.height.saturating_sub(4)).max(8);
+        let dialog_h = ((creds.len() as u16) + 8)
+            .min(area.height.saturating_sub(4))
+            .max(8);
         let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
         let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
         let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
@@ -2047,7 +2194,11 @@ impl App {
             Span::styled(" Agent Access: ", Style::default().fg(tp::TEXT_DIM)),
             Span::styled(access_label, access_style),
             Span::styled(
-                format!("  │  {} cred{}", creds.len(), if creds.len() == 1 { "" } else { "s" }),
+                format!(
+                    "  │  {} cred{}",
+                    creds.len(),
+                    if creds.len() == 1 { "" } else { "s" }
+                ),
                 Style::default().fg(tp::TEXT_DIM),
             ),
             Span::styled("  │  2FA: ", Style::default().fg(tp::TEXT_DIM)),
@@ -2064,7 +2215,9 @@ impl App {
         if creds.is_empty() {
             items.push(ListItem::new(Span::styled(
                 "  No credentials stored.",
-                Style::default().fg(tp::MUTED).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(tp::MUTED)
+                    .add_modifier(Modifier::ITALIC),
             )));
         } else {
             for (i, (name, entry)) in creds.iter().enumerate() {
@@ -2085,17 +2238,26 @@ impl App {
                 let badge = if is_disabled {
                     Span::styled(
                         " OFF ",
-                        Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::MUTED),
+                        Style::default()
+                            .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                            .bg(tp::MUTED),
                     )
                 } else {
                     let (label, color) = match &entry.policy {
                         AccessPolicy::Always => (" OPEN ", tp::SUCCESS),
                         AccessPolicy::WithApproval => (" ASK ", tp::WARN),
                         AccessPolicy::WithAuth => (" AUTH ", tp::ERROR),
-                        AccessPolicy::SkillOnly(skills) if skills.is_empty() => (" LOCK ", tp::MUTED),
+                        AccessPolicy::SkillOnly(skills) if skills.is_empty() => {
+                            (" LOCK ", tp::MUTED)
+                        }
                         AccessPolicy::SkillOnly(_) => (" SKILL ", tp::INFO),
                     };
-                    Span::styled(label, Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(color))
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                            .bg(color),
+                    )
                 };
 
                 let desc = entry.description.as_deref().unwrap_or("");
@@ -2106,7 +2268,10 @@ impl App {
                 };
 
                 let label_style = if is_disabled {
-                    Style::default().fg(tp::MUTED).add_modifier(Modifier::CROSSED_OUT).patch(row_style)
+                    Style::default()
+                        .fg(tp::MUTED)
+                        .add_modifier(Modifier::CROSSED_OUT)
+                        .patch(row_style)
                 } else {
                     Style::default().fg(tp::TEXT).patch(row_style)
                 };
@@ -2131,13 +2296,33 @@ impl App {
 
         // ── Legend ───────────────────────────────────────────────────
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(" OPEN ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::SUCCESS)),
+            Span::styled(
+                " OPEN ",
+                Style::default()
+                    .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                    .bg(tp::SUCCESS),
+            ),
             Span::styled(" anytime ", Style::default().fg(tp::TEXT_DIM)),
-            Span::styled(" ASK ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::WARN)),
+            Span::styled(
+                " ASK ",
+                Style::default()
+                    .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                    .bg(tp::WARN),
+            ),
             Span::styled(" per-use ", Style::default().fg(tp::TEXT_DIM)),
-            Span::styled(" AUTH ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::ERROR)),
+            Span::styled(
+                " AUTH ",
+                Style::default()
+                    .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                    .bg(tp::ERROR),
+            ),
             Span::styled(" re-auth ", Style::default().fg(tp::TEXT_DIM)),
-            Span::styled(" SKILL ", Style::default().fg(Color::Rgb(0x1E, 0x1C, 0x1A)).bg(tp::INFO)),
+            Span::styled(
+                " SKILL ",
+                Style::default()
+                    .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                    .bg(tp::INFO),
+            ),
             Span::styled(" skill-gated", Style::default().fg(tp::TEXT_DIM)),
         ])));
 
@@ -2159,2014 +2344,5 @@ impl App {
             .style(Style::default().fg(tp::TEXT));
 
         frame.render_widget(list, dialog_area);
-    }
-
-    // ── API-key dialog ──────────────────────────────────────────────────────
-
-    /// Open the API-key input dialog for the given provider.
-    fn open_api_key_dialog(&mut self, provider: String) -> Option<Action> {
-        let secret_key = match providers::secret_key_for_provider(&provider) {
-            Some(k) => k.to_string(),
-            None => return None, // shouldn't happen, but just in case
-        };
-        let display = providers::display_name_for_provider(&provider).to_string();
-        self.state.messages.push(DisplayMessage::warning(format!(
-            "No API key found for {}. Please enter one below.",
-            display,
-        )));
-        self.api_key_dialog = Some(ApiKeyDialogState {
-            provider,
-            display,
-            secret_key,
-            input: String::new(),
-            phase: ApiKeyDialogPhase::EnterKey,
-        });
-        None
-    }
-
-    /// Handle key events when the API key dialog is open.
-    fn handle_api_key_dialog_key(&mut self, code: crossterm::event::KeyCode) -> Action {
-        use crossterm::event::KeyCode;
-
-        // Take the dialog state so we can mutate it without borrowing self
-        let Some(mut dialog) = self.api_key_dialog.take() else {
-            return Action::Noop;
-        };
-
-        match dialog.phase {
-            ApiKeyDialogPhase::EnterKey => match code {
-                KeyCode::Esc => {
-                    self.state
-                        .messages
-                        .push(DisplayMessage::info("API key entry cancelled."));
-                    // dialog is already taken — dropped
-                    return Action::Noop;
-                }
-                KeyCode::Enter => {
-                    if dialog.input.is_empty() {
-                        self.state.messages.push(DisplayMessage::info(
-                            "No key entered — you can add one later with /provider.",
-                        ));
-                        return Action::Noop;
-                    }
-                    // Move to confirmation phase
-                    dialog.phase = ApiKeyDialogPhase::ConfirmStore;
-                    self.api_key_dialog = Some(dialog);
-                    return Action::Noop;
-                }
-                KeyCode::Backspace => {
-                    dialog.input.pop();
-                    self.api_key_dialog = Some(dialog);
-                    return Action::Noop;
-                }
-                KeyCode::Char(c) => {
-                    dialog.input.push(c);
-                    self.api_key_dialog = Some(dialog);
-                    return Action::Noop;
-                }
-                _ => {
-                    self.api_key_dialog = Some(dialog);
-                    return Action::Noop;
-                }
-            },
-            ApiKeyDialogPhase::ConfirmStore => match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    // Store it
-                    let provider = dialog.provider.clone();
-                    let key = dialog.input.clone();
-                    return Action::ConfirmStoreSecret { provider, key };
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    // Use the key for this session but don't store
-                    self.state.messages.push(DisplayMessage::success(format!(
-                        "✓ API key for {} set for this session (not stored).",
-                        dialog.display,
-                    )));
-                    // Proceed to model selection
-                    return Action::FetchModels(dialog.provider.clone());
-                }
-                _ => {
-                    self.api_key_dialog = Some(dialog);
-                    return Action::Noop;
-                }
-            },
-        }
-    }
-
-    /// Store the API key in the secrets vault after user confirmation.
-    fn handle_confirm_store_secret(
-        &mut self,
-        provider: String,
-        key: String,
-    ) -> Result<Option<Action>> {
-        let secret_key = providers::secret_key_for_provider(&provider)
-            .unwrap_or("API_KEY");
-        let display = providers::display_name_for_provider(&provider).to_string();
-
-        match self.state.secrets_manager.store_secret(&secret_key, &key) {
-            Ok(()) => {
-                self.state.messages.push(DisplayMessage::success(format!(
-                    "✓ API key for {} stored securely.",
-                    display,
-                )));
-            }
-            Err(e) => {
-                self.state.messages.push(DisplayMessage::error(format!(
-                    "Failed to store API key: {}. Key is set for this session only.",
-                    e,
-                )));
-            }
-        }
-        // After storing the key, proceed to model selection
-        Ok(Some(Action::FetchModels(provider)))
-    }
-
-    /// Draw a centered API-key dialog overlay.
-    fn draw_api_key_dialog(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        dialog: &ApiKeyDialogState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-
-        let dialog_w = 56.min(area.width.saturating_sub(4));
-        let dialog_h = 7_u16.min(area.height.saturating_sub(4)).max(5);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        // Clear the background behind the dialog
-        frame.render_widget(Clear, dialog_area);
-
-        let title = format!(" {} API Key ", dialog.display);
-        let block = Block::default()
-            .title(Span::styled(&title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    " Esc to cancel ",
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        match dialog.phase {
-            ApiKeyDialogPhase::EnterKey => {
-                // Label
-                let label = Line::from(Span::styled(
-                    format!(" Enter your {} API key:", dialog.display),
-                    Style::default().fg(tp::TEXT),
-                ));
-                if inner.height >= 1 {
-                    frame.render_widget(
-                        Paragraph::new(label),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
-                    );
-                }
-
-                // Masked input
-                if inner.height >= 3 {
-                    let masked: String = "•".repeat(dialog.input.len());
-                    let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1);
-                    let prompt = Line::from(vec![
-                        Span::styled("❯ ", Style::default().fg(tp::ACCENT)),
-                        Span::styled(&masked, Style::default().fg(tp::TEXT)),
-                    ]);
-                    frame.render_widget(Paragraph::new(prompt), input_area);
-
-                    // Show cursor
-                    frame.set_cursor_position((
-                        input_area.x + 2 + masked.len() as u16,
-                        input_area.y,
-                    ));
-                }
-            }
-            ApiKeyDialogPhase::ConfirmStore => {
-                // Show key length hint
-                let hint = Line::from(Span::styled(
-                    format!(" Key entered ({} chars).", dialog.input.len()),
-                    Style::default().fg(tp::SUCCESS),
-                ));
-                if inner.height >= 1 {
-                    frame.render_widget(
-                        Paragraph::new(hint),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
-                    );
-                }
-
-                // Store question
-                if inner.height >= 3 {
-                    let question = Line::from(vec![
-                        Span::styled(
-                            " Store permanently in secrets vault? ",
-                            Style::default().fg(tp::TEXT),
-                        ),
-                        Span::styled(
-                            "[Y/n]",
-                            Style::default()
-                                .fg(tp::ACCENT_BRIGHT)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]);
-                    frame.render_widget(
-                        Paragraph::new(question),
-                        Rect::new(inner.x, inner.y + 2, inner.width, 1),
-                    );
-                }
-            }
-        }
-    }
-
-    // ── Model selector dialog ───────────────────────────────────────────────
-
-    /// Spawn a background task to fetch models and send the result back
-    /// via the action channel.  Shows an inline loading line in the meantime.
-    fn spawn_fetch_models(&mut self, provider: String) {
-        let display = providers::display_name_for_provider(&provider).to_string();
-        self.state.messages.push(DisplayMessage::info(format!(
-            "Fetching available models for {}…",
-            display,
-        )));
-
-        // Show the inline loading line under the chat log
-        let spinner = SPINNER_FRAMES[0];
-        self.state.loading_line = Some(format!(
-            "  {} Fetching models from {}…",
-            spinner, display,
-        ));
-        self.fetch_loading = Some(FetchModelsLoading {
-            display: display.clone(),
-            tick: 0,
-        });
-
-        // Gather what we need for the background task
-        let api_key = providers::secret_key_for_provider(&provider)
-            .and_then(|sk| {
-                self.state
-                    .secrets_manager
-                    .get_secret(sk, true)
-                    .ok()
-                    .flatten()
-            });
-
-        let base_url = self
-            .state
-            .config
-            .model
-            .as_ref()
-            .and_then(|m| m.base_url.clone());
-
-        let tx = self.action_tx.clone();
-        let provider_clone = provider.clone();
-
-        tokio::spawn(async move {
-            match providers::fetch_models(
-                &provider_clone,
-                api_key.as_deref(),
-                base_url.as_deref(),
-            )
-            .await
-            {
-                Ok(models) => {
-                    let _ = tx.send(Action::ShowModelSelector {
-                        provider: provider_clone,
-                        models,
-                    });
-                }
-                Err(err) => {
-                    let _ = tx.send(Action::FetchModelsFailed(err));
-                }
-            }
-        });
-    }
-
-    /// Draw a centered loading spinner overlay.
-
-    // ── Device flow authentication ──────────────────────────────────────────
-
-    /// Spawn a background task to perform OAuth device flow authentication.
-    /// Shows the verification URL and user code as messages, then polls for
-    /// the token in the background.
-    fn spawn_device_flow(&mut self, provider: String) {
-        let def = match providers::provider_by_id(&provider) {
-            Some(d) => d,
-            None => {
-                self.state.messages.push(DisplayMessage::error(format!("Unknown provider: {}", provider)));
-                return;
-            }
-        };
-
-        let device_config = match def.device_flow {
-            Some(cfg) => cfg,
-            None => {
-                self.state.messages.push(DisplayMessage::warning(format!(
-                    "{} does not support device flow authentication.",
-                    def.display,
-                )));
-                return;
-            }
-        };
-
-        let display = def.display.to_string();
-        self.state.messages.push(DisplayMessage::info(format!(
-            "Authenticating with {}…",
-            display,
-        )));
-
-        // Show the inline loading line
-        let spinner = SPINNER_FRAMES[0];
-        self.state.loading_line = Some(format!(
-            "  {} Starting {} authentication…",
-            spinner, display,
-        ));
-        self.device_flow_loading = Some(FetchModelsLoading {
-            display: display.clone(),
-            tick: 0,
-        });
-
-        let tx = self.action_tx.clone();
-        let provider_clone = provider.clone();
-        // All fields of DeviceFlowConfig are &'static str, so we can just
-        // copy the reference to the static config into the spawned task.
-        let device_cfg: &'static providers::DeviceFlowConfig = device_config;
-
-        tokio::spawn(async move {
-            // Step 1: Start the device flow
-            let auth = match providers::start_device_flow(device_cfg).await {
-                Ok(a) => a,
-                Err(e) => {
-                    let _ = tx.send(Action::DeviceFlowFailed(format!(
-                        "Failed to start device flow: {}", e,
-                    )));
-                    return;
-                }
-            };
-
-            // Step 2: Show the URL and code to the user via messages
-            let _ = tx.send(Action::DeviceFlowCodeReady {
-                url: auth.verification_uri.clone(),
-                code: auth.user_code.clone(),
-            });
-
-            // Step 3: Poll for the token
-            let interval = std::time::Duration::from_secs(auth.interval.max(5));
-            let max_attempts = (auth.expires_in / interval.as_secs()).max(10);
-
-            for _ in 0..max_attempts {
-                tokio::time::sleep(interval).await;
-
-                match providers::poll_device_token(device_cfg, &auth.device_code).await {
-                    Ok(Some(token)) => {
-                        let _ = tx.send(Action::DeviceFlowAuthenticated {
-                            provider: provider_clone,
-                            token,
-                        });
-                        return;
-                    }
-                    Ok(None) => {
-                        // Still pending — keep polling
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Action::DeviceFlowFailed(format!(
-                            "Authentication failed: {}", e,
-                        )));
-                        return;
-                    }
-                }
-            }
-
-            let _ = tx.send(Action::DeviceFlowFailed(
-                "Authentication timed out. Please try again with /provider.".to_string(),
-            ));
-        });
-    }
-
-    /// Open the model selector dialog with the given list.
-    fn open_model_selector(&mut self, provider: String, models: Vec<String>) {
-        let display = providers::display_name_for_provider(&provider).to_string();
-        self.model_selector = Some(ModelSelectorState {
-            provider,
-            display,
-            models,
-            selected: 0,
-            scroll_offset: 0,
-        });
-    }
-
-    /// Handle key events when the model selector dialog is open.
-    fn handle_model_selector_key(&mut self, code: crossterm::event::KeyCode) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut sel) = self.model_selector.take() else {
-            return Action::Noop;
-        };
-
-        // Maximum visible rows in the dialog body
-        const MAX_VISIBLE: usize = 14;
-
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.state
-                    .messages
-                    .push(DisplayMessage::info("Model selection cancelled."));
-                return Action::Noop;
-            }
-            KeyCode::Enter => {
-                if let Some(model_name) = sel.models.get(sel.selected).cloned() {
-                    // Save the selected model
-                    let model_cfg =
-                        self.state.config.model.get_or_insert_with(|| {
-                            crate::config::ModelProvider {
-                                provider: sel.provider.clone(),
-                                model: None,
-                                base_url: None,
-                            }
-                        });
-                    model_cfg.model = Some(model_name.clone());
-                    if let Err(e) = self.state.config.save(None) {
-                        self.state
-                            .messages
-                            .push(DisplayMessage::error(format!("Failed to save config: {}", e)));
-                    } else {
-                        self.state.messages.push(DisplayMessage::success(format!(
-                            "✓ Model set to {}.",
-                            model_name,
-                        )));
-                    }
-                }
-                // Restart the gateway so it picks up the new model.
-                return Action::RestartGateway;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if sel.selected > 0 {
-                    sel.selected -= 1;
-                    if sel.selected < sel.scroll_offset {
-                        sel.scroll_offset = sel.selected;
-                    }
-                }
-                self.model_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if sel.selected + 1 < sel.models.len() {
-                    sel.selected += 1;
-                    if sel.selected >= sel.scroll_offset + MAX_VISIBLE {
-                        sel.scroll_offset = sel.selected - MAX_VISIBLE + 1;
-                    }
-                }
-                self.model_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::Home => {
-                sel.selected = 0;
-                sel.scroll_offset = 0;
-                self.model_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::End => {
-                sel.selected = sel.models.len().saturating_sub(1);
-                sel.scroll_offset = sel
-                    .models
-                    .len()
-                    .saturating_sub(MAX_VISIBLE);
-                self.model_selector = Some(sel);
-                return Action::Noop;
-            }
-            _ => {
-                self.model_selector = Some(sel);
-                return Action::Noop;
-            }
-        }
-    }
-
-    /// Draw a centered model-selector dialog overlay.
-    fn draw_model_selector_dialog(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        sel: &ModelSelectorState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
-
-        const MAX_VISIBLE: usize = 14;
-
-        let dialog_w = 60.min(area.width.saturating_sub(4));
-        let visible_count = sel.models.len().min(MAX_VISIBLE);
-        // +4 for border (2) + title line + hint line
-        let dialog_h = ((visible_count as u16) + 4)
-            .min(area.height.saturating_sub(4))
-            .max(6);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        // Clear the background behind the dialog
-        frame.render_widget(Clear, dialog_area);
-
-        let title = format!(" Select a {} model ", sel.display);
-        let hint = if sel.models.len() > MAX_VISIBLE {
-            format!(
-                " {}/{} · ↑↓ navigate · Enter select · Esc cancel ",
-                sel.selected + 1,
-                sel.models.len(),
-            )
-        } else {
-            " ↑↓ navigate · Enter select · Esc cancel ".to_string()
-        };
-
-        let block = Block::default()
-            .title(Span::styled(&title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    &hint,
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let end = (sel.scroll_offset + MAX_VISIBLE).min(sel.models.len());
-        let visible_models = &sel.models[sel.scroll_offset..end];
-
-        let items: Vec<ListItem> = visible_models
-            .iter()
-            .enumerate()
-            .map(|(i, model)| {
-                let abs_idx = sel.scroll_offset + i;
-                let is_selected = abs_idx == sel.selected;
-                let (marker, style) = if is_selected {
-                    (
-                        "❯ ",
-                        Style::default()
-                            .fg(tp::ACCENT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    ("  ", Style::default().fg(tp::TEXT))
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(marker, Style::default().fg(tp::ACCENT)),
-                    Span::styled(model.as_str(), style),
-                ]))
-            })
-            .collect();
-
-        let list =
-            List::new(items).style(Style::default().fg(tp::TEXT));
-
-        frame.render_widget(list, inner);
-    }
-
-    // ── Provider selector dialog ──────────────────────────────
-
-    /// Open the provider-selector dialog populated from the shared
-    /// provider registry.
-    fn open_provider_selector(&mut self) {
-        let providers: Vec<(String, String)> = providers::PROVIDERS
-            .iter()
-            .map(|p| (p.id.to_string(), p.display.to_string()))
-            .collect();
-        self.provider_selector = Some(ProviderSelectorState {
-            providers,
-            selected: 0,
-            scroll_offset: 0,
-        });
-    }
-
-    /// Handle key events when the provider selector dialog is open.
-    fn handle_provider_selector_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut sel) = self.provider_selector.take() else {
-            return Action::Noop;
-        };
-
-        const MAX_VISIBLE: usize = 14;
-
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.state
-                    .messages
-                    .push(DisplayMessage::info("Provider selection cancelled."));
-                return Action::Noop;
-            }
-            KeyCode::Enter => {
-                if let Some((id, display)) =
-                    sel.providers.get(sel.selected).cloned()
-                {
-                    self.state.messages.push(DisplayMessage::info(format!(
-                        "Switching provider to {}\u{2026}",
-                        display,
-                    )));
-                    return Action::SetProvider(id);
-                }
-                return Action::Noop;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if sel.selected > 0 {
-                    sel.selected -= 1;
-                    if sel.selected < sel.scroll_offset {
-                        sel.scroll_offset = sel.selected;
-                    }
-                }
-                self.provider_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if sel.selected + 1 < sel.providers.len() {
-                    sel.selected += 1;
-                    if sel.selected >= sel.scroll_offset + MAX_VISIBLE {
-                        sel.scroll_offset =
-                            sel.selected - MAX_VISIBLE + 1;
-                    }
-                }
-                self.provider_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::Home => {
-                sel.selected = 0;
-                sel.scroll_offset = 0;
-                self.provider_selector = Some(sel);
-                return Action::Noop;
-            }
-            KeyCode::End => {
-                sel.selected =
-                    sel.providers.len().saturating_sub(1);
-                sel.scroll_offset =
-                    sel.providers.len().saturating_sub(MAX_VISIBLE);
-                self.provider_selector = Some(sel);
-                return Action::Noop;
-            }
-            _ => {
-                self.provider_selector = Some(sel);
-                return Action::Noop;
-            }
-        }
-    }
-
-    /// Draw a centered provider-selector dialog overlay.
-    fn draw_provider_selector_dialog(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        sel: &ProviderSelectorState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{
-            Block, Borders, Clear, List, ListItem,
-        };
-
-        const MAX_VISIBLE: usize = 14;
-
-        let dialog_w = 50.min(area.width.saturating_sub(4));
-        let visible_count = sel.providers.len().min(MAX_VISIBLE);
-        let dialog_h = ((visible_count as u16) + 4)
-            .min(area.height.saturating_sub(4))
-            .max(6);
-        let x =
-            area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y =
-            area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let title = " Select a provider ";
-        let hint = if sel.providers.len() > MAX_VISIBLE {
-            format!(
-                " {}/{} · ↑↓ navigate · Enter select · Esc cancel ",
-                sel.selected + 1,
-                sel.providers.len(),
-            )
-        } else {
-            " ↑↓ navigate · Enter select · Esc cancel ".to_string()
-        };
-
-        let block = Block::default()
-            .title(Span::styled(title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    &hint,
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let end = (sel.scroll_offset + MAX_VISIBLE)
-            .min(sel.providers.len());
-        let visible = &sel.providers[sel.scroll_offset..end];
-
-        let items: Vec<ListItem> = visible
-            .iter()
-            .enumerate()
-            .map(|(i, (_id, display))| {
-                let abs_idx = sel.scroll_offset + i;
-                let is_selected = abs_idx == sel.selected;
-                let (marker, style) = if is_selected {
-                    (
-                        "❯ ",
-                        Style::default()
-                            .fg(tp::ACCENT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    ("  ", Style::default().fg(tp::TEXT))
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        marker,
-                        Style::default().fg(tp::ACCENT),
-                    ),
-                    Span::styled(display.as_str(), style),
-                ]))
-            })
-            .collect();
-
-        let list =
-            List::new(items).style(Style::default().fg(tp::TEXT));
-
-        frame.render_widget(list, inner);
-    }
-
-    // ── Credential management dialog ──────────────────────────
-
-    /// Handle key events when the credential dialog is open.
-    fn handle_credential_dialog_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut dlg) = self.credential_dialog.take() else {
-            return Action::Noop;
-        };
-
-        let options = [
-            CredDialogOption::ViewSecret,
-            CredDialogOption::CopySecret,
-            CredDialogOption::ChangePolicy,
-            CredDialogOption::ToggleDisable,
-            CredDialogOption::Delete,
-            CredDialogOption::SetupTotp,
-            CredDialogOption::Cancel,
-        ];
-
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Close without action
-                return Action::Noop;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                let cur = options.iter().position(|o| *o == dlg.selected).unwrap_or(0);
-                let next = if cur == 0 { options.len() - 1 } else { cur - 1 };
-                dlg.selected = options[next];
-                self.credential_dialog = Some(dlg);
-                return Action::Noop;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let cur = options.iter().position(|o| *o == dlg.selected).unwrap_or(0);
-                let next = (cur + 1) % options.len();
-                dlg.selected = options[next];
-                self.credential_dialog = Some(dlg);
-                return Action::Noop;
-            }
-            KeyCode::Enter => {
-                match dlg.selected {
-                    CredDialogOption::ViewSecret => {
-                        match self.state.secrets_manager.peek_credential_display(&dlg.name) {
-                            Ok(fields) => {
-                                self.secret_viewer = Some(SecretViewerState {
-                                    name: dlg.name.clone(),
-                                    fields,
-                                    revealed: false,
-                                    selected: 0,
-                                    scroll_offset: 0,
-                                    status: None,
-                                });
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to read secret: {}", e,
-                                )));
-                            }
-                        }
-                        return Action::Noop;
-                    }
-                    CredDialogOption::CopySecret => {
-                        match self.state.secrets_manager.peek_credential_display(&dlg.name) {
-                            Ok(fields) => {
-                                // Copy the first (or only) value to clipboard.
-                                let text = if fields.len() == 1 {
-                                    fields[0].1.clone()
-                                } else {
-                                    // Multi-field: join as "Label: Value" lines.
-                                    fields.iter()
-                                        .map(|(k, v)| format!("{}: {}", k, v))
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                };
-                                match Self::copy_to_clipboard(&text) {
-                                    Ok(()) => {
-                                        self.state.messages.push(DisplayMessage::success(format!(
-                                            "Credential '{}' copied to clipboard.", dlg.name,
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        self.state.messages.push(DisplayMessage::error(format!(
-                                            "Failed to copy: {}", e,
-                                        )));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to read secret: {}", e,
-                                )));
-                            }
-                        }
-                        return Action::Update;
-                    }
-                    CredDialogOption::ChangePolicy => {
-                        // Determine the currently selected policy picker option
-                        let selected = match &dlg.current_policy {
-                            crate::secrets::AccessPolicy::Always => PolicyPickerOption::Open,
-                            crate::secrets::AccessPolicy::WithApproval => PolicyPickerOption::Ask,
-                            crate::secrets::AccessPolicy::WithAuth => PolicyPickerOption::Auth,
-                            crate::secrets::AccessPolicy::SkillOnly(_) => PolicyPickerOption::Skill,
-                        };
-                        self.policy_picker = Some(PolicyPickerState {
-                            cred_name: dlg.name.clone(),
-                            selected,
-                            phase: PolicyPickerPhase::Selecting,
-                        });
-                        return Action::Noop;
-                    }
-                    CredDialogOption::ToggleDisable => {
-                        let new_state = !dlg.disabled;
-                        match self.state.secrets_manager.set_credential_disabled(&dlg.name, new_state) {
-                            Ok(()) => {
-                                let verb = if new_state { "disabled" } else { "enabled" };
-                                self.state.messages.push(DisplayMessage::success(format!(
-                                    "Credential '{}' {}.", dlg.name, verb,
-                                )));
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to update credential: {}", e,
-                                )));
-                            }
-                        }
-                    }
-                    CredDialogOption::Delete => {
-                        // For legacy bare keys, also delete the raw key
-                        let meta_key = format!("cred:{}", dlg.name);
-                        let is_legacy = self.state.secrets_manager
-                            .get_secret(&meta_key, true)
-                            .ok()
-                            .flatten()
-                            .is_none();
-
-                        if is_legacy {
-                            let _ = self.state.secrets_manager.delete_secret(&dlg.name);
-                        }
-                        match self.state.secrets_manager.delete_credential(&dlg.name) {
-                            Ok(()) => {
-                                self.state.messages.push(DisplayMessage::success(format!(
-                                    "Credential '{}' deleted.", dlg.name,
-                                )));
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to delete credential: {}", e,
-                                )));
-                            }
-                        }
-                    }
-                    CredDialogOption::SetupTotp => {
-                        return Action::ShowTotpSetup;
-                    }
-                    CredDialogOption::Cancel => {
-                        // Close
-                    }
-                }
-                return Action::Update;
-            }
-            _ => {
-                self.credential_dialog = Some(dlg);
-                return Action::Noop;
-            }
-        }
-    }
-
-    /// Draw a centered credential-management dialog overlay.
-    fn draw_credential_dialog(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        dlg: &CredentialDialogState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{
-            Block, Borders, Clear, List, ListItem,
-        };
-
-        let dialog_w = 50.min(area.width.saturating_sub(4));
-        let dialog_h = 14u16.min(area.height.saturating_sub(4)).max(9);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let title = format!(" {} ", dlg.name);
-        let hint = " ↑↓ navigate · Enter select · Esc cancel ";
-
-        let block = Block::default()
-            .title(Span::styled(&title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let toggle_label = if dlg.disabled {
-            "  Enable credential"
-        } else {
-            "  Disable credential"
-        };
-
-        let totp_label = if dlg.has_totp {
-            "🔒 Manage 2FA (TOTP)"
-        } else {
-            "🔒 Set up 2FA (TOTP)"
-        };
-
-        let policy_label = format!("🛡 Change policy [{}]", dlg.current_policy.badge());
-
-        let menu_items: Vec<(String, CredDialogOption)> = vec![
-            ("👁 View secret".to_string(), CredDialogOption::ViewSecret),
-            ("📋 Copy to clipboard".to_string(), CredDialogOption::CopySecret),
-            (policy_label, CredDialogOption::ChangePolicy),
-            (toggle_label.to_string(), CredDialogOption::ToggleDisable),
-            ("  Delete credential".to_string(), CredDialogOption::Delete),
-            (totp_label.to_string(), CredDialogOption::SetupTotp),
-            ("  Cancel".to_string(), CredDialogOption::Cancel),
-        ];
-
-        let items: Vec<ListItem> = menu_items
-            .iter()
-            .map(|(label, opt)| {
-                let is_selected = *opt == dlg.selected;
-                let (marker, style) = if is_selected {
-                    (
-                        "❯ ",
-                        Style::default()
-                            .fg(tp::ACCENT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    ("  ", Style::default().fg(tp::TEXT))
-                };
-
-                // Colour the delete option red when highlighted
-                let final_style = if *opt == CredDialogOption::Delete && is_selected {
-                    style.fg(tp::ERROR)
-                } else {
-                    style
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(marker, Style::default().fg(tp::ACCENT)),
-                    Span::styled(label.as_str(), final_style),
-                ]))
-            })
-            .collect();
-
-        let list = List::new(items).style(Style::default().fg(tp::TEXT));
-        frame.render_widget(list, inner);
-    }
-
-    // ── Policy picker dialog ───────────────────────────────────
-
-    /// Handle key events when the policy-picker dialog is open.
-    fn handle_policy_picker_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut picker) = self.policy_picker.take() else {
-            return Action::Noop;
-        };
-
-        match picker.phase {
-            PolicyPickerPhase::Selecting => {
-                let options = [
-                    PolicyPickerOption::Open,
-                    PolicyPickerOption::Ask,
-                    PolicyPickerOption::Auth,
-                    PolicyPickerOption::Skill,
-                ];
-
-                match code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        // Cancel — go back to credential dialog
-                        return Action::Noop;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let cur = options.iter().position(|o| *o == picker.selected).unwrap_or(0);
-                        let next = if cur == 0 { options.len() - 1 } else { cur - 1 };
-                        picker.selected = options[next];
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let cur = options.iter().position(|o| *o == picker.selected).unwrap_or(0);
-                        let next = (cur + 1) % options.len();
-                        picker.selected = options[next];
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                    KeyCode::Enter => {
-                        match picker.selected {
-                            PolicyPickerOption::Open => {
-                                match self.state.secrets_manager.set_credential_policy(
-                                    &picker.cred_name,
-                                    crate::secrets::AccessPolicy::Always,
-                                ) {
-                                    Ok(()) => {
-                                        self.state.messages.push(DisplayMessage::success(format!(
-                                            "Policy for '{}' set to OPEN.", picker.cred_name,
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        self.state.messages.push(DisplayMessage::error(format!(
-                                            "Failed to set policy: {}", e,
-                                        )));
-                                    }
-                                }
-                                return Action::Update;
-                            }
-                            PolicyPickerOption::Ask => {
-                                match self.state.secrets_manager.set_credential_policy(
-                                    &picker.cred_name,
-                                    crate::secrets::AccessPolicy::WithApproval,
-                                ) {
-                                    Ok(()) => {
-                                        self.state.messages.push(DisplayMessage::success(format!(
-                                            "Policy for '{}' set to ASK.", picker.cred_name,
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        self.state.messages.push(DisplayMessage::error(format!(
-                                            "Failed to set policy: {}", e,
-                                        )));
-                                    }
-                                }
-                                return Action::Update;
-                            }
-                            PolicyPickerOption::Auth => {
-                                match self.state.secrets_manager.set_credential_policy(
-                                    &picker.cred_name,
-                                    crate::secrets::AccessPolicy::WithAuth,
-                                ) {
-                                    Ok(()) => {
-                                        self.state.messages.push(DisplayMessage::success(format!(
-                                            "Policy for '{}' set to AUTH.", picker.cred_name,
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        self.state.messages.push(DisplayMessage::error(format!(
-                                            "Failed to set policy: {}", e,
-                                        )));
-                                    }
-                                }
-                                return Action::Update;
-                            }
-                            PolicyPickerOption::Skill => {
-                                // Transition to skill name input phase
-                                picker.phase = PolicyPickerPhase::EditingSkills {
-                                    input: String::new(),
-                                };
-                                self.policy_picker = Some(picker);
-                                return Action::Noop;
-                            }
-                        }
-                    }
-                    _ => {
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                }
-            }
-            PolicyPickerPhase::EditingSkills { ref mut input } => {
-                match code {
-                    KeyCode::Esc => {
-                        // Go back to the selection phase
-                        picker.phase = PolicyPickerPhase::Selecting;
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                    KeyCode::Char(c) => {
-                        input.push(c);
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                    KeyCode::Backspace => {
-                        input.pop();
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                    KeyCode::Enter => {
-                        let skills: Vec<String> = input
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-
-                        match self.state.secrets_manager.set_credential_policy(
-                            &picker.cred_name,
-                            crate::secrets::AccessPolicy::SkillOnly(skills.clone()),
-                        ) {
-                            Ok(()) => {
-                                if skills.is_empty() {
-                                    self.state.messages.push(DisplayMessage::success(format!(
-                                        "Policy for '{}' set to SKILL (locked — no skills).",
-                                        picker.cred_name,
-                                    )));
-                                } else {
-                                    self.state.messages.push(DisplayMessage::success(format!(
-                                        "Policy for '{}' set to SKILL ({}).",
-                                        picker.cred_name,
-                                        skills.join(", "),
-                                    )));
-                                }
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to set policy: {}", e,
-                                )));
-                            }
-                        }
-                        return Action::Update;
-                    }
-                    _ => {
-                        self.policy_picker = Some(picker);
-                        return Action::Noop;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Draw a centered policy-picker dialog overlay.
-    fn draw_policy_picker(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        picker: &PolicyPickerState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{
-            Block, Borders, Clear, List, ListItem, Paragraph,
-        };
-
-        let dialog_w = 52.min(area.width.saturating_sub(4));
-        let dialog_h = match picker.phase {
-            PolicyPickerPhase::Selecting => 12u16,
-            PolicyPickerPhase::EditingSkills { .. } => 8u16,
-        }
-        .min(area.height.saturating_sub(4))
-        .max(8);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        match picker.phase {
-            PolicyPickerPhase::Selecting => {
-                let title = format!(" {} — Access Policy ", picker.cred_name);
-                let hint = " ↑↓ navigate · Enter select · Esc cancel ";
-
-                let block = Block::default()
-                    .title(Span::styled(&title, tp::title_focused()))
-                    .title_bottom(
-                        Line::from(Span::styled(hint, Style::default().fg(tp::MUTED)))
-                            .right_aligned(),
-                    )
-                    .borders(Borders::ALL)
-                    .border_style(tp::focused_border())
-                    .border_type(ratatui::widgets::BorderType::Rounded);
-
-                let inner = block.inner(dialog_area);
-                frame.render_widget(block, dialog_area);
-
-                let options: Vec<(PolicyPickerOption, &str, &str, Color)> = vec![
-                    (PolicyPickerOption::Open, "OPEN", "  Agent can read anytime", tp::SUCCESS),
-                    (PolicyPickerOption::Ask, "ASK", "   Agent asks per use", tp::WARN),
-                    (PolicyPickerOption::Auth, "AUTH", "  Re-authenticate each time", tp::ERROR),
-                    (PolicyPickerOption::Skill, "SKILL", " Only named skills may read", tp::INFO),
-                ];
-
-                let items: Vec<ListItem> = options
-                    .iter()
-                    .map(|(opt, badge_text, desc, badge_color)| {
-                        let is_selected = *opt == picker.selected;
-                        let marker = if is_selected { "❯ " } else { "  " };
-
-                        let badge = Span::styled(
-                            format!(" {} ", badge_text),
-                            Style::default()
-                                .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
-                                .bg(*badge_color),
-                        );
-
-                        let desc_style = if is_selected {
-                            Style::default()
-                                .fg(tp::ACCENT_BRIGHT)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(tp::TEXT_DIM)
-                        };
-
-                        ListItem::new(Line::from(vec![
-                            Span::styled(marker, Style::default().fg(tp::ACCENT)),
-                            badge,
-                            Span::styled(*desc, desc_style),
-                        ]))
-                    })
-                    .collect();
-
-                // Render with a blank row at top for padding
-                let mut all_items = vec![ListItem::new("")];
-                all_items.extend(items);
-
-                let list = List::new(all_items);
-                frame.render_widget(list, inner);
-            }
-            PolicyPickerPhase::EditingSkills { ref input } => {
-                let title = format!(" {} — SKILL Policy ", picker.cred_name);
-                let hint = " Enter confirm · Esc back ";
-
-                let block = Block::default()
-                    .title(Span::styled(&title, tp::title_focused()))
-                    .title_bottom(
-                        Line::from(Span::styled(hint, Style::default().fg(tp::MUTED)))
-                            .right_aligned(),
-                    )
-                    .borders(Borders::ALL)
-                    .border_style(tp::focused_border())
-                    .border_type(ratatui::widgets::BorderType::Rounded);
-
-                let inner = block.inner(dialog_area);
-                frame.render_widget(block, dialog_area);
-
-                let prompt_text = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Enter skill names (comma-separated):",
-                        Style::default().fg(tp::TEXT_DIM),
-                    )),
-                    Line::from(Span::styled(
-                        " Leave empty to lock the credential.",
-                        Style::default().fg(tp::MUTED),
-                    )),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled(" > ", Style::default().fg(tp::ACCENT)),
-                        Span::styled(
-                            format!("{}_", input),
-                            Style::default().fg(tp::TEXT).add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                ];
-
-                let paragraph = Paragraph::new(prompt_text);
-                frame.render_widget(paragraph, inner);
-            }
-        }
-    }
-
-    // ── TOTP setup dialog ─────────────────────────────────────
-
-    /// Handle key events when the TOTP dialog is open.
-    fn handle_totp_dialog_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut dlg) = self.totp_dialog.take() else {
-            return Action::Noop;
-        };
-
-        match dlg.phase {
-            TotpDialogPhase::ShowUri { ref mut uri, ref mut input } |
-            TotpDialogPhase::Failed { ref mut uri, ref mut input } => {
-                match code {
-                    KeyCode::Esc => {
-                        // Cancel — remove the TOTP secret we just set up
-                        let _ = self.state.secrets_manager.remove_totp();
-                        return Action::Noop;
-                    }
-                    KeyCode::Char(c) if c.is_ascii_digit() && input.len() < 6 => {
-                        input.push(c);
-                        self.totp_dialog = Some(dlg);
-                        return Action::Noop;
-                    }
-                    KeyCode::Backspace => {
-                        input.pop();
-                        self.totp_dialog = Some(dlg);
-                        return Action::Noop;
-                    }
-                    KeyCode::Enter => {
-                        if input.len() == 6 {
-                            match self.state.secrets_manager.verify_totp(input) {
-                                Ok(true) => {
-                                    self.state.config.totp_enabled = true;
-                                    let _ = self.state.config.save(None);
-                                    self.state.messages.push(
-                                        DisplayMessage::success("✓ 2FA configured successfully."),
-                                    );
-                                    self.totp_dialog = Some(TotpDialogState {
-                                        phase: TotpDialogPhase::Verified,
-                                    });
-                                    return Action::Noop;
-                                }
-                                Ok(false) => {
-                                    let saved_uri = uri.clone();
-                                    self.totp_dialog = Some(TotpDialogState {
-                                        phase: TotpDialogPhase::Failed {
-                                            uri: saved_uri,
-                                            input: String::new(),
-                                        },
-                                    });
-                                    return Action::Noop;
-                                }
-                                Err(e) => {
-                                    self.state.messages.push(DisplayMessage::error(format!(
-                                        "TOTP verification error: {}", e,
-                                    )));
-                                    let _ = self.state.secrets_manager.remove_totp();
-                                    return Action::Noop;
-                                }
-                            }
-                        }
-                        self.totp_dialog = Some(dlg);
-                        return Action::Noop;
-                    }
-                    _ => {
-                        self.totp_dialog = Some(dlg);
-                        return Action::Noop;
-                    }
-                }
-            }
-            TotpDialogPhase::AlreadyConfigured => {
-                match code {
-                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        // Keep 2FA
-                        return Action::Noop;
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        // Remove 2FA
-                        match self.state.secrets_manager.remove_totp() {
-                            Ok(()) => {
-                                self.state.config.totp_enabled = false;
-                                let _ = self.state.config.save(None);
-                                self.state.messages.push(
-                                    DisplayMessage::info("2FA has been removed."),
-                                );
-                            }
-                            Err(e) => {
-                                self.state.messages.push(DisplayMessage::error(format!(
-                                    "Failed to remove 2FA: {}", e,
-                                )));
-                            }
-                        }
-                        return Action::Noop;
-                    }
-                    _ => {
-                        self.totp_dialog = Some(dlg);
-                        return Action::Noop;
-                    }
-                }
-            }
-            TotpDialogPhase::Verified => {
-                // Any key closes
-                return Action::Noop;
-            }
-        }
-    }
-
-    /// Draw a centered TOTP setup dialog overlay.
-    fn draw_totp_dialog(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        dlg: &TotpDialogState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{
-            Block, Borders, Clear, Paragraph, Wrap,
-        };
-
-        let dialog_w = 56.min(area.width.saturating_sub(4));
-        let dialog_h = 12u16.min(area.height.saturating_sub(4)).max(8);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let (title, lines, hint): (&str, Vec<Line>, &str) = match &dlg.phase {
-            TotpDialogPhase::ShowUri { uri, input } => {
-                let masked: String = "*".repeat(input.len())
-                    + &"_".repeat(6 - input.len());
-                (
-                    " Set up 2FA ",
-                    vec![
-                        Line::from(Span::styled(
-                            "Add this URI to your authenticator app:",
-                            Style::default().fg(tp::TEXT),
-                        )),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            uri.as_str(),
-                            Style::default().fg(tp::ACCENT_BRIGHT),
-                        )),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            "Enter the 6-digit code to verify:",
-                            Style::default().fg(tp::TEXT),
-                        )),
-                        Line::from(Span::styled(
-                            format!("  Code: [{}]", masked),
-                            Style::default().fg(tp::WARN).add_modifier(Modifier::BOLD),
-                        )),
-                    ],
-                    " Enter code · Esc cancel ",
-                )
-            }
-            TotpDialogPhase::Failed { input, .. } => {
-                let masked: String = "*".repeat(input.len())
-                    + &"_".repeat(6 - input.len());
-                (
-                    " 2FA Verification ",
-                    vec![
-                        Line::from(Span::styled(
-                            "✗ Code invalid — please try again.",
-                            Style::default().fg(tp::ERROR).add_modifier(Modifier::BOLD),
-                        )),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            format!("  Code: [{}]", masked),
-                            Style::default().fg(tp::WARN).add_modifier(Modifier::BOLD),
-                        )),
-                    ],
-                    " Enter code · Esc cancel ",
-                )
-            }
-            TotpDialogPhase::AlreadyConfigured => {
-                (
-                    " 2FA Active ",
-                    vec![
-                        Line::from(Span::styled(
-                            "Two-factor authentication is already configured.",
-                            Style::default().fg(tp::SUCCESS),
-                        )),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            "Remove 2FA? (y/n)",
-                            Style::default().fg(tp::WARN),
-                        )),
-                    ],
-                    " y remove · n/Esc keep ",
-                )
-            }
-            TotpDialogPhase::Verified => {
-                (
-                    " 2FA Configured ",
-                    vec![
-                        Line::from(Span::styled(
-                            "✓ Two-factor authentication is now active.",
-                            Style::default().fg(tp::SUCCESS).add_modifier(Modifier::BOLD),
-                        )),
-                        Line::from(""),
-                        Line::from(Span::styled(
-                            "Credentials with AUTH policy will require TOTP.",
-                            Style::default().fg(tp::TEXT_DIM),
-                        )),
-                    ],
-                    " Press any key to close ",
-                )
-            }
-        };
-
-        let block = Block::default()
-            .title(Span::styled(title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let text = ratatui::text::Text::from(lines);
-        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, inner);
-    }
-
-    // ── Gateway auth prompt (TOTP code entry) ─────────────────
-
-    /// Handle key events when the gateway TOTP auth prompt is open.
-    fn handle_auth_prompt_key(&mut self, code: crossterm::event::KeyCode) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut prompt) = self.auth_prompt.take() else {
-            return Action::Noop;
-        };
-
-        match code {
-            KeyCode::Esc => {
-                self.state
-                    .messages
-                    .push(DisplayMessage::info("Authentication cancelled."));
-                self.state.gateway_status = GatewayStatus::Error;
-                Action::Update
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() && prompt.input.len() < 6 => {
-                prompt.input.push(c);
-                self.auth_prompt = Some(prompt);
-                Action::Noop
-            }
-            KeyCode::Backspace => {
-                prompt.input.pop();
-                self.auth_prompt = Some(prompt);
-                Action::Noop
-            }
-            KeyCode::Enter => {
-                if prompt.input.len() == 6 {
-                    let code_str = prompt.input.clone();
-                    // Dialog is consumed — send the code
-                    Action::GatewayAuthResponse(code_str)
-                } else {
-                    self.auth_prompt = Some(prompt);
-                    Action::Noop
-                }
-            }
-            _ => {
-                self.auth_prompt = Some(prompt);
-                Action::Noop
-            }
-        }
-    }
-
-    /// Draw a centered gateway TOTP auth prompt overlay.
-    fn draw_auth_prompt(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        prompt: &AuthPromptState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-
-        let dialog_w = 46.min(area.width.saturating_sub(4));
-        let dialog_h = 7u16.min(area.height.saturating_sub(4)).max(5);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let block = Block::default()
-            .title(Span::styled(" 🔑 Gateway Authentication ", tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    " Esc to cancel ",
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        // Label
-        if inner.height >= 1 {
-            let label = Line::from(Span::styled(
-                " Enter your 6-digit TOTP code:",
-                Style::default().fg(tp::TEXT),
-            ));
-            frame.render_widget(
-                Paragraph::new(label),
-                Rect::new(inner.x, inner.y, inner.width, 1),
-            );
-        }
-
-        // Input with dots for each digit and placeholders
-        if inner.height >= 3 {
-            let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1);
-            let mut spans = vec![Span::styled("❯ ", Style::default().fg(tp::ACCENT))];
-            for (i, ch) in prompt.input.chars().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(" ", Style::default()));
-                }
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(tp::ACCENT_BRIGHT).add_modifier(Modifier::BOLD),
-                ));
-            }
-            for i in prompt.input.len()..6 {
-                if i > 0 {
-                    spans.push(Span::styled(" ", Style::default()));
-                }
-                spans.push(Span::styled("·", Style::default().fg(tp::MUTED)));
-            }
-            let line = Line::from(spans);
-            frame.render_widget(Paragraph::new(line), input_area);
-
-            // Cursor
-            let cursor_x = input_area.x + 2 + (prompt.input.len() * 2) as u16;
-            frame.set_cursor_position((cursor_x, input_area.y));
-        }
-    }
-
-    // ── Gateway vault unlock prompt (password entry) ──────────
-
-    /// Handle key events when the vault unlock password prompt is open.
-    fn handle_vault_unlock_prompt_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut prompt) = self.vault_unlock_prompt.take() else {
-            return Action::Noop;
-        };
-
-        match code {
-            KeyCode::Esc => {
-                self.state
-                    .messages
-                    .push(DisplayMessage::info("Vault unlock cancelled."));
-                Action::Update
-            }
-            KeyCode::Enter => {
-                if prompt.input.is_empty() {
-                    self.vault_unlock_prompt = Some(prompt);
-                    Action::Noop
-                } else {
-                    let password = prompt.input.clone();
-                    // Dialog is consumed — send the password
-                    Action::GatewayUnlockVault(password)
-                }
-            }
-            KeyCode::Backspace => {
-                prompt.input.pop();
-                self.vault_unlock_prompt = Some(prompt);
-                Action::Noop
-            }
-            KeyCode::Char(c) => {
-                prompt.input.push(c);
-                self.vault_unlock_prompt = Some(prompt);
-                Action::Noop
-            }
-            _ => {
-                self.vault_unlock_prompt = Some(prompt);
-                Action::Noop
-            }
-        }
-    }
-
-    /// Draw a centered vault unlock password prompt overlay.
-    fn draw_vault_unlock_prompt(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        prompt: &VaultUnlockPromptState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-
-        let dialog_w = 52.min(area.width.saturating_sub(4));
-        let dialog_h = 7u16.min(area.height.saturating_sub(4)).max(5);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let block = Block::default()
-            .title(Span::styled(" 🔒 Unlock Gateway Vault ", tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    " Esc to cancel ",
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        // Label
-        if inner.height >= 1 {
-            let label = Line::from(Span::styled(
-                " Enter vault password:",
-                Style::default().fg(tp::TEXT),
-            ));
-            frame.render_widget(
-                Paragraph::new(label),
-                Rect::new(inner.x, inner.y, inner.width, 1),
-            );
-        }
-
-        // Masked input
-        if inner.height >= 3 {
-            let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1);
-            let masked: String = "•".repeat(prompt.input.len());
-            let line = Line::from(vec![
-                Span::styled("❯ ", Style::default().fg(tp::ACCENT)),
-                Span::styled(&masked, Style::default().fg(tp::TEXT)),
-            ]);
-            frame.render_widget(Paragraph::new(line), input_area);
-
-            // Cursor
-            frame.set_cursor_position((
-                input_area.x + 2 + masked.len() as u16,
-                input_area.y,
-            ));
-        }
-    }
-
-    // ── Clipboard helper ──────────────────────────────────────
-
-    /// Copy text to the system clipboard using platform-native tools.
-    fn copy_to_clipboard(text: &str) -> Result<()> {
-        use anyhow::Context;
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        #[cfg(target_os = "macos")]
-        let mut child = Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .spawn()
-            .context("Failed to launch pbcopy")?;
-
-        #[cfg(target_os = "linux")]
-        let mut child = {
-            // Try xclip first, fall back to xsel
-            Command::new("xclip")
-                .args(["-selection", "clipboard"])
-                .stdin(Stdio::piped())
-                .spawn()
-                .or_else(|_| {
-                    Command::new("xsel")
-                        .arg("--clipboard")
-                        .stdin(Stdio::piped())
-                        .spawn()
-                })
-                .context("Failed to launch xclip or xsel")?
-        };
-
-        #[cfg(target_os = "windows")]
-        let mut child = Command::new("clip")
-            .stdin(Stdio::piped())
-            .spawn()
-            .context("Failed to launch clip.exe")?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())
-                .context("Failed to write to clipboard process")?;
-        }
-        child.wait().context("Clipboard process failed")?;
-        Ok(())
-    }
-
-    // ── Secret viewer dialog ──────────────────────────────────
-
-    /// Handle key events when the secret viewer dialog is open.
-    fn handle_secret_viewer_key(
-        &mut self,
-        code: crossterm::event::KeyCode,
-    ) -> Action {
-        use crossterm::event::KeyCode;
-
-        let Some(mut viewer) = self.secret_viewer.take() else {
-            return Action::Noop;
-        };
-
-        // Clear transient status on any keypress
-        viewer.status = None;
-
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Close viewer
-                return Action::Noop;
-            }
-            KeyCode::Char('r') => {
-                // Toggle reveal/mask
-                viewer.revealed = !viewer.revealed;
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-            KeyCode::Char('c') => {
-                // Copy the selected field value to clipboard
-                if let Some((_label, value)) = viewer.fields.get(viewer.selected) {
-                    match Self::copy_to_clipboard(value) {
-                        Ok(()) => {
-                            viewer.status = Some("Copied!".to_string());
-                        }
-                        Err(e) => {
-                            viewer.status = Some(format!("Copy failed: {}", e));
-                        }
-                    }
-                }
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-            KeyCode::Char('a') => {
-                // Copy all fields to clipboard
-                let text = viewer.fields.iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                match Self::copy_to_clipboard(&text) {
-                    Ok(()) => {
-                        viewer.status = Some("All fields copied!".to_string());
-                    }
-                    Err(e) => {
-                        viewer.status = Some(format!("Copy failed: {}", e));
-                    }
-                }
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if viewer.selected > 0 {
-                    viewer.selected -= 1;
-                }
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if viewer.selected + 1 < viewer.fields.len() {
-                    viewer.selected += 1;
-                }
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-            _ => {
-                self.secret_viewer = Some(viewer);
-                return Action::Noop;
-            }
-        }
-    }
-
-    /// Draw a centered secret-viewer dialog overlay.
-    fn draw_secret_viewer(
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        viewer: &SecretViewerState,
-    ) {
-        use crate::theme::tui_palette as tp;
-        use ratatui::widgets::{
-            Block, Borders, Clear, List, ListItem,
-        };
-
-        // Size: width up to 70, height = fields + header/status/hint + borders
-        let dialog_w = 70u16.min(area.width.saturating_sub(4));
-        let content_lines = viewer.fields.len() as u16 + 3; // fields + blank + status + blank
-        let dialog_h = (content_lines + 3)
-            .min(area.height.saturating_sub(4))
-            .max(8);
-        let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
-        let dialog_area = Rect::new(x, y, dialog_w, dialog_h);
-
-        frame.render_widget(Clear, dialog_area);
-
-        let title = format!(" {} ", viewer.name);
-        let reveal_hint = if viewer.revealed { "r:hide" } else { "r:reveal" };
-        let hint = format!(
-            " ↑↓ select · c copy · a copy all · {} · Esc close ",
-            reveal_hint,
-        );
-
-        let block = Block::default()
-            .title(Span::styled(&title, tp::title_focused()))
-            .title_bottom(
-                Line::from(Span::styled(
-                    &hint,
-                    Style::default().fg(tp::MUTED),
-                ))
-                .right_aligned(),
-            )
-            .borders(Borders::ALL)
-            .border_style(tp::focused_border())
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(dialog_area);
-        frame.render_widget(block, dialog_area);
-
-        let max_label_w = viewer.fields.iter()
-            .map(|(k, _)| k.len())
-            .max()
-            .unwrap_or(0);
-
-        let mut items: Vec<ListItem> = Vec::new();
-
-        for (i, (label, value)) in viewer.fields.iter().enumerate() {
-            let is_selected = i == viewer.selected;
-            let display_value = if viewer.revealed {
-                value.clone()
-            } else {
-                "•".repeat(value.len().min(32))
-            };
-
-            // Truncate to fit dialog width
-            let avail = (dialog_w as usize).saturating_sub(max_label_w + 8);
-            let truncated = if display_value.len() > avail {
-                format!("{}…", &display_value[..avail.saturating_sub(1)])
-            } else {
-                display_value
-            };
-
-            let (marker, label_style, val_style) = if is_selected {
-                (
-                    "❯ ",
-                    Style::default()
-                        .fg(tp::ACCENT_BRIGHT)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(tp::TEXT)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                (
-                    "  ",
-                    Style::default().fg(tp::TEXT_DIM),
-                    Style::default().fg(tp::TEXT),
-                )
-            };
-
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(tp::ACCENT)),
-                Span::styled(
-                    format!("{:>width$}: ", label, width = max_label_w),
-                    label_style,
-                ),
-                Span::styled(truncated, val_style),
-            ])));
-        }
-
-        // Status line
-        if let Some(ref status) = viewer.status {
-            items.push(ListItem::new(""));
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!("  {}", status),
-                Style::default().fg(tp::SUCCESS).add_modifier(Modifier::BOLD),
-            ))));
-        }
-
-        let list = List::new(items).style(Style::default().fg(tp::TEXT));
-        frame.render_widget(list, inner);
     }
 }
