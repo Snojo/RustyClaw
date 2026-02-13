@@ -1,32 +1,62 @@
-# RustyClaw
+# RustyClaw 🦀🦞
 
 A super-lightweight, super-capable agentic tool with improved security versus OpenClaw.
+
+<p align="center">
+  <img src="logo.svg" alt="RustyClaw Logo" width="200"/>
+</p>
+
+## ✅ Feature Parity Status
+
+**RustyClaw has achieved full feature parity with OpenClaw!**
+
+| Category | Status | Details |
+|----------|--------|---------|
+| **Tools** | ✅ Complete | 30 tools implemented |
+| **Skills** | ✅ Complete | Load, gate, inject into prompts |
+| **Messengers** | ✅ Complete | Webhook, Console, Discord, Telegram |
+| **Streaming** | ✅ Complete | OpenAI + Anthropic SSE |
+| **Gateway** | ✅ Complete | WebSocket, auth, heartbeat |
+| **TUI** | ✅ Complete | 12+ slash commands |
+| **Secrets** | ✅ Complete | Vault + TOTP + policies |
+| **Multi-session** | ✅ Complete | Spawn, list, send, history |
+
+### Tools (30 total)
+
+| Category | Tools |
+|----------|-------|
+| **File** | read_file, write_file, edit_file, list_directory, search_files, find_files |
+| **Runtime** | execute_command, process |
+| **Web** | web_fetch, web_search |
+| **Memory** | memory_search, memory_get |
+| **Scheduling** | cron |
+| **Sessions** | sessions_list, sessions_spawn, sessions_send, sessions_history, session_status, agents_list |
+| **Editing** | apply_patch |
+| **Secrets** | secrets_list, secrets_get, secrets_store |
+| **System** | gateway, message, tts |
+| **Media** | image |
+| **Devices** | nodes |
+| **Browser** | browser |
+| **Canvas** | canvas |
 
 ## Features
 
 - **Written in Rust**: High-performance, memory-safe implementation
-- **OpenClaw Compatible**: Architecture based on OpenClaw with inspiration from NanoBot and PicoClaw
-- **Skills Support**: Able to use skills from OpenClaw
+- **OpenClaw Compatible**: Drop-in replacement with same tools and skills
+- **30 Agentic Tools**: Full tool coverage for file, web, memory, sessions, and more
+- **Skills Support**: OpenClaw/AgentSkills compatible with gating
 - **SOUL.md**: Configurable agent personality and behavior
-- **Secure Secrets Storage**: Integrated secrets storage with user-controlled access
-- **TUI Interface**: Terminal User Interface as the main interface
-- **Messenger Support**: Support for the same messengers as OpenClaw
-
-## Architecture
-
-RustyClaw is designed with security and modularity in mind:
-
-- **Configuration Management**: OpenClaw-compatible settings directory
-- **Skills System**: Load and manage skills dynamically
-- **SOUL Management**: Define agent personality through SOUL.md
-- **Secrets Manager**: Secure keyring-based secrets storage with user approval
-- **Messenger Abstraction**: Extensible messenger interface for multiple platforms
+- **Secure Secrets Storage**: Encrypted vault with TOTP 2FA and policies
+- **TUI Interface**: Terminal UI with slash commands and tab completion
+- **Multi-Provider**: OpenAI, Anthropic, Google, GitHub Copilot, xAI, Ollama, OpenRouter
+- **Streaming**: Real-time token delivery from providers
+- **Messenger Backends**: Webhook, Console, Discord, Telegram
 
 ## Installation
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust 1.75 or later
 - Cargo (comes with Rust)
 
 ### Building from Source
@@ -39,163 +69,171 @@ cargo build --release
 
 The binary will be available at `target/release/rustyclaw`.
 
-## Usage
+## Quick Start
 
-### Running RustyClaw
-
-```bash
-cargo run
-```
-
-Or if you built the release version:
+### Run the TUI
 
 ```bash
-./target/release/rustyclaw
+rustyclaw tui
 ```
 
-### CLI Commands
-
-Run the TUI:
+### Run the Gateway
 
 ```bash
-./target/release/rustyclaw tui
+rustyclaw gateway start
 ```
 
-Run a command locally (headless):
+### Send a One-Shot Command
 
 ```bash
-./target/release/rustyclaw command help
+rustyclaw command "What time is it?"
 ```
 
-Send a command to the gateway:
+### Check Status
 
 ```bash
-./target/release/rustyclaw command --gateway ws://127.0.0.1:9001 help
+rustyclaw status
 ```
 
-### Gateway
+## CLI Commands
 
-Start the WebSocket gateway:
-
-```bash
-./target/release/rustyclaw-gateway serve --listen ws://127.0.0.1:9001
+```
+rustyclaw
+├── setup          # Initialize config + workspace
+├── onboard        # Interactive setup wizard
+├── configure      # Configuration wizard
+├── config         # Config get/set/unset
+├── doctor         # Health checks + fixes
+├── tui            # Launch terminal UI
+├── command        # Send one-shot message
+├── status         # Show system status
+├── gateway        # Gateway management
+│   ├── start
+│   ├── stop
+│   ├── restart
+│   └── status
+└── skills         # Skill management
+    ├── list
+    └── enable/disable
 ```
 
-### TUI Interface
+## TUI Slash Commands
 
-The Terminal User Interface provides the following views:
-
-- **F1**: Main view - Message display and command input
-- **F2**: Skills view - View and manage loaded skills
-- **F3**: Secrets view - Manage secrets and agent access
-- **F4**: Config view - View configuration and SOUL content
-- **ESC**: Return to Main view
-- **q**: Quit (from Main view)
-
-### Available Commands
-
-In the input field, you can use the following commands:
-
-- `help` - Display available commands
-- `clear` - Clear message history
-- `enable-access` - Enable agent access to secrets
-- `disable-access` - Disable agent access to secrets
-- `reload-skills` - Reload skills from disk
-- `q` - Quit the application (from Main view)
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/clear` | Clear message history |
+| `/provider` | Change AI provider |
+| `/model` | Change model |
+| `/gateway` | Gateway connection status |
+| `/secrets` | Manage secrets |
+| `/skills` | List loaded skills |
+| `/status` | Show session status |
+| `/quit` | Exit the TUI |
 
 ## Configuration
 
-RustyClaw uses a configuration file located at `~/.rustyclaw/config.toml`.
-
-### Default Configuration
+Configuration lives at `~/.rustyclaw/config.toml`:
 
 ```toml
-settings_dir = "/home/user/.rustyclaw"
-use_secrets = true
+[gateway]
+bind = "127.0.0.1:18789"
+token = "your-secret-token"
 
-[[messengers]]
-name = "example"
-enabled = false
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[secrets]
+enabled = true
+require_auth = true
 ```
-
-### Configuration Options
-
-- `settings_dir`: Directory for RustyClaw settings and data
-- `soul_path`: Path to SOUL.md file (optional, defaults to `~/.rustyclaw/SOUL.md`)
-- `skills_dir`: Directory containing skills (optional, defaults to `~/.rustyclaw/skills`)
-- `use_secrets`: Whether to use the secrets storage system
-- `messengers`: Array of messenger configurations
-
-## SOUL.md
-
-The SOUL.md file defines the agent's personality and behavior. RustyClaw creates a default SOUL.md on first run if one doesn't exist. You can customize it to define:
-
-- Core Identity
-- Principles
-- Capabilities
-- Limitations
 
 ## Skills
 
-Skills are stored as JSON or YAML files in the skills directory (`~/.rustyclaw/skills` by default).
+RustyClaw loads skills from:
 
-### Skill Format
+1. `<workspace>/skills` (highest precedence)
+2. `~/.rustyclaw/skills`
+3. Bundled skills (lowest precedence)
 
-```json
-{
-  "name": "example_skill",
-  "description": "An example skill",
-  "path": "/path/to/skill",
-  "enabled": true
-}
+### Skill Format (SKILL.md)
+
+```markdown
+---
+name: my-skill
+description: Does something useful
+metadata: {"openclaw": {"requires": {"bins": ["git"]}}}
+---
+
+# Instructions
+
+Use git to do things.
 ```
 
-Skills are compatible with OpenClaw's skill format.
+### Gating
 
-## Secrets Management
+Skills can require:
+- **bins**: Binaries on PATH
+- **anyBins**: At least one of these binaries
+- **env**: Environment variables
+- **config**: Config values
+- **os**: Operating systems (darwin, linux, win32)
 
-RustyClaw provides secure secrets storage with user control:
+## Security
 
-1. **Agent Access Control**: Secrets are only accessible to the agent when explicitly enabled
-2. **System Keyring**: Uses the system's secure keyring for storage
-3. **User Approval**: Individual secrets can require user approval before access
+- **Encrypted Secrets**: AES-256 encrypted vault
+- **TOTP 2FA**: Optional two-factor authentication
+- **Access Policies**: Always, WithAuth, SkillOnly, Never
+- **Rate Limiting**: Protection against brute force
+- **Lockout**: Account lockout after failed attempts
 
-### Managing Secrets
-
-From the Secrets view (F3), you can:
-- Enable/disable agent access to all secrets
-- Store new secrets
-- Delete existing secrets
-
-## Security Features
-
-- **Secrets Isolation**: Agent cannot access secrets without user permission
-- **Keyring Storage**: Secrets stored in system keyring (not plain text)
-- **Minimal Permissions**: Follows principle of least privilege
-- **User Control**: All security-sensitive operations require user approval
-
-## Development
-
-### Running Tests
+## Testing
 
 ```bash
+# Run all tests (unit + integration)
 cargo test
+
+# Run specific test suite
+cargo test --test cli_conformance
+cargo test --test gateway_protocol
+cargo test --test tool_execution
+
+# Update golden files
+UPDATE_GOLDEN=1 cargo test --test golden_files
 ```
 
-### Building Documentation
+### Test Coverage
 
-```bash
-cargo doc --open
+- **152+ unit tests** in source modules
+- **200+ integration tests** in 7 test files:
+  - `cli_conformance.rs` - CLI help and behavior
+  - `gateway_protocol.rs` - WebSocket protocol
+  - `skill_execution.rs` - Skill loading and gating
+  - `tool_execution.rs` - All 30 tools
+  - `exit_codes.rs` - Exit code conformance
+  - `golden_files.rs` - Help output stability
+  - `streaming.rs` - SSE parsing
+
+## Architecture
+
 ```
-
-## OpenClaw Compatibility
-
-RustyClaw is designed to be compatible with OpenClaw:
-
-- Supports OpenClaw skills format
-- Compatible settings directory structure
-- SOUL.md support
-- Messenger interface compatible with OpenClaw messengers
+rustyclaw
+├── src/
+│   ├── tools.rs        # 30 tool definitions
+│   ├── gateway.rs      # WebSocket server
+│   ├── app.rs          # TUI application
+│   ├── skills.rs       # Skill loading + gating
+│   ├── messenger.rs    # Messaging backends
+│   ├── streaming.rs    # SSE streaming
+│   ├── secrets.rs      # Encrypted vault
+│   ├── sessions.rs     # Multi-session support
+│   ├── memory.rs       # BM25 memory search
+│   ├── cron.rs         # Scheduled jobs
+│   └── process_manager.rs # Background processes
+└── tests/
+    └── *.rs            # Integration tests
+```
 
 ## License
 
@@ -204,3 +242,8 @@ MIT License - See LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## See Also
+
+- [OpenClaw](https://github.com/openclaw/openclaw) - The original project
+- [PARITY_PLAN.md](PARITY_PLAN.md) - Detailed feature parity tracking

@@ -131,8 +131,8 @@
 |------|--------|-------|
 | Run parity matrix review and close remaining gaps | ⚠️ In progress | This document tracks status |
 | Add integration tests for CLI + gateway + skills + messengers | ✅ Done | 7 integration test files, 200+ tests |
-| Update README and QUICKSTART with parity status | ❌ Todo | |
-| Publish versioned parity notes and changelog | ❌ Todo | |
+| Update README and QUICKSTART with parity status | ✅ Done | README.md updated |
+| Publish versioned parity notes and changelog | ✅ Done | CHANGELOG.md created |
 
 ---
 
