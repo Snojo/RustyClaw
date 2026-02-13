@@ -2,10 +2,12 @@
 //!
 //! This module provides the gateway server that handles WebSocket connections
 //! from TUI clients, manages authentication, and dispatches chat requests to
-//! model providers.
+//! model providers. It also polls configured messengers (Telegram, Discord, etc.)
+//! for incoming messages and routes them through the model.
 
 mod auth;
 mod helpers;
+mod messenger_handler;
 mod providers;
 mod secrets_handler;
 mod skills_handler;
@@ -15,6 +17,11 @@ mod types;
 pub use types::{
     ChatMessage, ChatRequest, CopilotSession, GatewayOptions, ModelContext, ModelResponse,
     ParsedToolCall, ProbeResult, ProviderRequest, ToolCallResult,
+};
+
+// Re-export messenger handler types
+pub use messenger_handler::{
+    create_messenger_manager, run_messenger_loop, SharedMessengerManager,
 };
 
 use crate::config::Config;
@@ -110,6 +117,52 @@ pub async fn run_gateway(
 
     let model_ctx = model_ctx.map(Arc::new);
     let rate_limiter = auth::new_rate_limiter();
+
+    // ── Initialize and start messenger loop ─────────────────────────
+    //
+    // If messengers are configured, we poll them for incoming messages
+    // and route them through the model.
+    let messenger_mgr = if !config.messengers.is_empty() {
+        match messenger_handler::create_messenger_manager(&config).await {
+            Ok(mgr) => {
+                let shared_mgr: SharedMessengerManager = Arc::new(Mutex::new(mgr));
+                
+                // Spawn messenger loop
+                let messenger_config = config.clone();
+                let messenger_ctx = model_ctx.clone();
+                let messenger_vault = vault.clone();
+                let messenger_skills = skill_mgr.clone();
+                let messenger_cancel = cancel.child_token();
+                let mgr_clone = shared_mgr.clone();
+                
+                tokio::spawn(async move {
+                    if let Err(e) = messenger_handler::run_messenger_loop(
+                        messenger_config,
+                        mgr_clone,
+                        messenger_ctx,
+                        messenger_vault,
+                        messenger_skills,
+                        messenger_cancel,
+                    ).await {
+                        eprintln!("[gateway] Messenger loop error: {}", e);
+                    }
+                });
+                
+                Some(shared_mgr)
+            }
+            Err(e) => {
+                eprintln!("[gateway] Failed to initialize messengers: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    eprintln!("[gateway] Listening on {}", addr);
+    if messenger_mgr.is_some() {
+        eprintln!("[gateway] Messenger polling enabled");
+    }
 
     loop {
         tokio::select! {

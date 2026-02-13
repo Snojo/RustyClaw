@@ -80,13 +80,59 @@ pub struct Config {
     /// ClawHub API token for publishing / authenticated downloads.
     #[serde(default)]
     pub clawhub_token: Option<String>,
+    /// System prompt for the agent (used for messenger conversations).
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Messenger polling interval in milliseconds (default: 2000).
+    #[serde(default)]
+    pub messenger_poll_interval_ms: Option<u32>,
 }
 
+/// Configuration for a messenger backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessengerConfig {
+    /// Display name for this messenger instance.
     pub name: String,
+    /// Messenger type: telegram, discord, signal, matrix, webhook.
+    #[serde(default)]
+    pub messenger_type: String,
+    /// Whether this messenger is enabled.
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Path to external config file (optional).
+    #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// Bot/API token (Telegram, Discord).
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Webhook URL (for webhook messenger).
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Matrix homeserver URL.
+    #[serde(default)]
+    pub homeserver: Option<String>,
+    /// Matrix user ID (@user:homeserver).
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Password (Matrix).
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Access token (Matrix).
+    #[serde(default)]
+    pub access_token: Option<String>,
+    /// Phone number (Signal).
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Allowed chat IDs/channels (whitelist).
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
+    /// Allowed user IDs (whitelist).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -111,6 +157,8 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             clawhub_url: None,
             clawhub_token: None,
+            system_prompt: None,
+            messenger_poll_interval_ms: None,
         }
     }
 }
