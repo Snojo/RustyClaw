@@ -3079,6 +3079,12 @@ fn params_to_json_schema(params: &[ToolParam]) -> (Value, Value) {
         let mut prop = serde_json::Map::new();
         prop.insert("type".into(), json!(p.param_type));
         prop.insert("description".into(), json!(p.description));
+        
+        // Arrays need an items schema
+        if p.param_type == "array" {
+            prop.insert("items".into(), json!({"type": "string"}));
+        }
+        
         properties.insert(p.name.clone(), Value::Object(prop));
         if p.required {
             required.push(json!(p.name));
