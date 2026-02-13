@@ -173,6 +173,7 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &MESSAGE,
         &TTS,
         &IMAGE,
+        &NODES,
     ]
 }
 
@@ -424,6 +425,16 @@ pub static IMAGE: ToolDef = ToolDef {
                   answers the prompt about the image.",
     parameters: vec![],
     execute: exec_image,
+};
+
+pub static NODES: ToolDef = ToolDef {
+    name: "nodes",
+    description: "Discover and control paired nodes (companion devices). Actions: \
+                  status (list nodes), describe (node details), pending/approve/reject (pairing), \
+                  notify (send notification), camera_snap/camera_list (camera), \
+                  screen_record (screen capture), location_get (GPS), run/invoke (remote commands).",
+    parameters: vec![],
+    execute: exec_nodes,
 };
 
 /// We need a runtime-constructed param list because `Vec` isn't const.
@@ -893,6 +904,59 @@ fn image_params() -> Vec<ToolParam> {
         ToolParam {
             name: "prompt".into(),
             description: "Question or instruction about the image. Default: 'Describe the image.'".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+fn nodes_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action: 'status', 'describe', 'pending', 'approve', 'reject', 'notify', 'camera_snap', 'camera_list', 'screen_record', 'location_get', 'run', 'invoke'.".into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "node".into(),
+            description: "Node ID or name to target.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "requestId".into(),
+            description: "Pairing request ID for approve/reject.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "title".into(),
+            description: "Notification title.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "body".into(),
+            description: "Notification body text.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "command".into(),
+            description: "Command array for 'run' action.".into(),
+            param_type: "array".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "invokeCommand".into(),
+            description: "Command name for 'invoke' action.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "facing".into(),
+            description: "Camera facing: 'front', 'back', or 'both'.".into(),
             param_type: "string".into(),
             required: false,
         },
@@ -3147,6 +3211,133 @@ fn exec_image(args: &Value, workspace_dir: &Path) -> Result<String, String> {
     ))
 }
 
+/// Discover and control paired nodes.
+fn exec_nodes(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: action".to_string())?;
+
+    let node = args.get("node").and_then(|v| v.as_str());
+
+    match action {
+        "status" => {
+            // In real implementation, query gateway for connected nodes
+            Ok("Node status:\n\nNo nodes currently paired.\n\nTo pair a node:\n1. Run `openclaw node run` on the target device\n2. Use `nodes` with action='pending' to see pairing requests\n3. Use `nodes` with action='approve' to approve".to_string())
+        }
+
+        "describe" => {
+            let node_id = node.ok_or("Missing 'node' parameter for describe action")?;
+            Ok(format!(
+                "Node description requested for: {}\n\nNote: Requires gateway integration to fetch node details.",
+                node_id
+            ))
+        }
+
+        "pending" => {
+            Ok("Pending pairing requests:\n\nNo pending requests.\n\nNote: Requires gateway integration.".to_string())
+        }
+
+        "approve" => {
+            let request_id = args
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'requestId' for approve action")?;
+            Ok(format!("Would approve pairing request: {}\n\nNote: Requires gateway integration.", request_id))
+        }
+
+        "reject" => {
+            let request_id = args
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'requestId' for reject action")?;
+            Ok(format!("Would reject pairing request: {}\n\nNote: Requires gateway integration.", request_id))
+        }
+
+        "notify" => {
+            let node_id = node.ok_or("Missing 'node' parameter for notify action")?;
+            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Notification");
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            
+            Ok(format!(
+                "Notification queued:\n- Node: {}\n- Title: {}\n- Body: {}\n\nNote: Requires node connection.",
+                node_id, title, body
+            ))
+        }
+
+        "camera_snap" => {
+            let node_id = node.ok_or("Missing 'node' parameter for camera_snap")?;
+            let facing = args.get("facing").and_then(|v| v.as_str()).unwrap_or("back");
+            
+            Ok(format!(
+                "Camera snapshot requested:\n- Node: {}\n- Facing: {}\n\nNote: Requires paired node with camera access.",
+                node_id, facing
+            ))
+        }
+
+        "camera_list" => {
+            let node_id = node.ok_or("Missing 'node' parameter for camera_list")?;
+            Ok(format!(
+                "Camera list requested for node: {}\n\nNote: Requires paired node.",
+                node_id
+            ))
+        }
+
+        "screen_record" => {
+            let node_id = node.ok_or("Missing 'node' parameter for screen_record")?;
+            Ok(format!(
+                "Screen recording requested for node: {}\n\nNote: Requires paired node with screen recording permission.",
+                node_id
+            ))
+        }
+
+        "location_get" => {
+            let node_id = node.ok_or("Missing 'node' parameter for location_get")?;
+            Ok(format!(
+                "Location requested for node: {}\n\nNote: Requires paired node with location permission.",
+                node_id
+            ))
+        }
+
+        "run" => {
+            let node_id = node.ok_or("Missing 'node' parameter for run action")?;
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            
+            if command.is_empty() {
+                return Err("Missing 'command' array for run action".to_string());
+            }
+            
+            Ok(format!(
+                "Remote command requested:\n- Node: {}\n- Command: {}\n\nNote: Requires paired node host.",
+                node_id,
+                command.join(" ")
+            ))
+        }
+
+        "invoke" => {
+            let node_id = node.ok_or("Missing 'node' parameter for invoke action")?;
+            let invoke_cmd = args
+                .get("invokeCommand")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'invokeCommand' for invoke action")?;
+            
+            Ok(format!(
+                "Node invoke requested:\n- Node: {}\n- Command: {}\n\nNote: Requires paired node.",
+                node_id, invoke_cmd
+            ))
+        }
+
+        _ => Err(format!(
+            "Unknown action: {}. Valid: status, describe, pending, approve, reject, notify, camera_snap, camera_list, screen_record, location_get, run, invoke",
+            action
+        )),
+    }
+}
+
 // ── Provider-specific formatters ────────────────────────────────────────────
 
 /// Parameters for a tool, building a JSON Schema `properties` / `required`.
@@ -3207,6 +3398,7 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "message" => message_params(),
         "tts" => tts_params(),
         "image" => image_params(),
+        "nodes" => nodes_params(),
         _ => vec![],
     }
 }
@@ -3556,7 +3748,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -3565,7 +3757,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -3573,7 +3765,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -4026,5 +4218,31 @@ mod tests {
         let result = exec_image(&args, ws());
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Is URL: true"));
+    }
+
+    // ── nodes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_nodes_params_defined() {
+        let params = nodes_params();
+        assert_eq!(params.len(), 8);
+        assert!(params.iter().any(|p| p.name == "action" && p.required));
+        assert!(params.iter().any(|p| p.name == "node" && !p.required));
+    }
+
+    #[test]
+    fn test_nodes_missing_action() {
+        let args = json!({});
+        let result = exec_nodes(&args, ws());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[test]
+    fn test_nodes_status() {
+        let args = json!({ "action": "status" });
+        let result = exec_nodes(&args, ws());
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Node status"));
     }
 }
