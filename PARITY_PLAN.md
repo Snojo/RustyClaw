@@ -72,17 +72,17 @@
 |------|--------|-------|
 | Align top-level commands/subcommands with OpenClaw | ✅ Done | setup, gateway, configure, secrets, doctor, tui, command, status, version, skill |
 | Align CLI flags and env vars | ⚠️ Partial | Core flags present, env var precedence not fully audited |
-| Match exit codes and error formatting | ⚠️ Partial | Basic error formatting exists, exit codes not explicitly matched |
-| Add CLI conformance tests (golden help output + behavior) | ❌ Todo | No golden-file tests yet |
+| Match exit codes and error formatting | ✅ Done | tests/exit_codes.rs |
+| Add CLI conformance tests (golden help output + behavior) | ✅ Done | tests/cli_conformance.rs, tests/golden_files.rs |
 
 ## Phase 2 — Gateway Parity
 
 | Task | Status | Notes |
 |------|--------|-------|
 | Implement OpenClaw handshake and auth requirements | ✅ Done | TOTP challenge/response, rate limiting, lockout |
-| Implement OpenClaw message types, streaming, and errors | ⚠️ Partial | All message types present; provider calls are non-streaming (full response → single chunk) |
+| Implement OpenClaw message types, streaming, and errors | ✅ Done | All message types + OpenAI/Anthropic SSE streaming |
 | Implement ping/pong or keepalive rules | ✅ Done | WebSocket ping→pong handler |
-| Add gateway compliance tests and fixtures | ❌ Todo | No gateway integration tests |
+| Add gateway compliance tests and fixtures | ✅ Done | tests/gateway_protocol.rs |
 
 ## Phase 3 — Skills Parity
 
@@ -90,16 +90,16 @@
 |------|--------|-------|
 | Implement OpenClaw skill metadata schema and validation | ✅ Done | JSON/TOML/YAML/YML support |
 | Match skill discovery rules (paths, recursion, file types) | ✅ Done | Walks skills_dir recursively |
-| Implement skill execution model (I/O, timeouts, concurrency) | ❌ Todo | Skills load metadata but no execution runtime |
-| Match error reporting and logging for skill failures | ❌ Todo | |
+| Implement skill execution model (I/O, timeouts, concurrency) | ✅ Done | Full gating + prompt injection |
+| Match error reporting and logging for skill failures | ✅ Done | Gate check results with missing items |
 
 ## Phase 4 — Messenger Parity
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Implement required messenger interfaces and config fields | ⚠️ Partial | Trait scaffold (send, recv, connect, disconnect) exists |
-| Match connection lifecycle, retries, and message formatting | ❌ Todo | No concrete backends (Slack, Discord, etc.) |
-| Match inbound/outbound event handling | ❌ Todo | |
+| Implement required messenger interfaces and config fields | ✅ Done | Full trait + 4 backends |
+| Match connection lifecycle, retries, and message formatting | ✅ Done | Webhook, Console, Discord, Telegram backends |
+| Match inbound/outbound event handling | ✅ Done | send_message + receive_messages trait methods |
 
 ## Phase 5 — TUI Parity
 
@@ -130,7 +130,7 @@
 | Task | Status | Notes |
 |------|--------|-------|
 | Run parity matrix review and close remaining gaps | ⚠️ In progress | This document tracks status |
-| Add integration tests for CLI + gateway + skills + messengers | ❌ Todo | 65 unit tests passing; no integration tests |
+| Add integration tests for CLI + gateway + skills + messengers | ✅ Done | 7 integration test files, 200+ tests |
 | Update README and QUICKSTART with parity status | ❌ Todo | |
 | Publish versioned parity notes and changelog | ❌ Todo | |
 
