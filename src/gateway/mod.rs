@@ -117,38 +117,56 @@ pub async fn run_gateway(
     {
         // First check for imported session token
         let mut vault_guard = vault.lock().await;
-        let session_from_import = vault_guard
-            .get_secret("GITHUB_COPILOT_SESSION", true)
-            .ok()
-            .flatten()
-            .and_then(|json_str| {
-                serde_json::from_str::<serde_json::Value>(&json_str).ok()
-            })
-            .and_then(|json| {
-                let token = json.get("session_token")?.as_str()?.to_string();
-                let expires_at = json.get("expires_at")?.as_i64()?;
-                
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                
-                if expires_at > now + 60 {
-                    Some(CopilotSession::from_session_token(token, expires_at))
-                } else {
-                    None
-                }
-            });
+        let session_result = vault_guard.get_secret("GITHUB_COPILOT_SESSION", true);
+        
+        let session_from_import = match &session_result {
+            Ok(Some(json_str)) => {
+                eprintln!("  ✓ Found GITHUB_COPILOT_SESSION in vault");
+                serde_json::from_str::<serde_json::Value>(json_str)
+                    .ok()
+                    .and_then(|json| {
+                        let token = json.get("session_token")?.as_str()?.to_string();
+                        let expires_at = json.get("expires_at")?.as_i64()?;
+                        
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        
+                        let remaining = expires_at - now;
+                        eprintln!("    Session expires in {}s", remaining);
+                        
+                        if remaining > 60 {
+                            Some(CopilotSession::from_session_token(token, expires_at))
+                        } else {
+                            eprintln!("    Session expired or expiring soon");
+                            None
+                        }
+                    })
+            }
+            Ok(None) => {
+                eprintln!("  ⊘ GITHUB_COPILOT_SESSION not found in vault");
+                None
+            }
+            Err(e) => {
+                eprintln!("  ✗ Failed to read GITHUB_COPILOT_SESSION: {}", e);
+                None
+            }
+        };
         drop(vault_guard);
 
         if let Some(session) = session_from_import {
+            eprintln!("  ✓ Using imported session token");
             Some(Arc::new(session))
         } else {
             // Fall back to OAuth token
-            model_ctx
-                .as_ref()
-                .and_then(|ctx| ctx.api_key.clone())
-                .map(|oauth| Arc::new(CopilotSession::new(oauth)))
+            if let Some(oauth) = model_ctx.as_ref().and_then(|ctx| ctx.api_key.clone()) {
+                eprintln!("  → Falling back to OAuth token");
+                Some(Arc::new(CopilotSession::new(oauth)))
+            } else {
+                eprintln!("  ✗ No OAuth token available either");
+                None
+            }
         }
     } else {
         None
