@@ -610,19 +610,13 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
                             }
                         }
 
+                        // Track if this chunk signals completion
+                        let mut should_exit = false;
+
                         // Process choices
                         if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
                             for choice in choices {
-                                // Check finish_reason — terminal reasons should exit the loop
-                                if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
-                                    finish_reason = Some(fr.to_string());
-                                    // "stop" or "tool_calls" means the model is done
-                                    if fr == "stop" || fr == "tool_calls" || fr == "length" || fr == "end_turn" {
-                                        break 'outer;
-                                    }
-                                }
-
-                                // Extract delta content
+                                // Extract delta content FIRST (before checking finish_reason)
                                 if let Some(delta) = choice.get("delta") {
                                     // Text content
                                     if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
@@ -663,7 +657,21 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
                                         }
                                     }
                                 }
+
+                                // Check finish_reason AFTER extracting delta data
+                                if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                                    finish_reason = Some(fr.to_string());
+                                    // Terminal reasons mean the model is done
+                                    if fr == "stop" || fr == "tool_calls" || fr == "tool_use" || fr == "length" || fr == "end_turn" {
+                                        should_exit = true;
+                                    }
+                                }
                             }
+                        }
+
+                        // Exit after processing all data in this chunk
+                        if should_exit {
+                            break 'outer;
                         }
                     }
                 }
