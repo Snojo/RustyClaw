@@ -583,7 +583,19 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
         };
 
         let chunk = chunk_result.context("SSE stream read error")?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        
+        // Debug: log raw SSE chunks to file
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/rustyclaw_sse_debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "--- CHUNK ---\n{}", chunk_str);
+        }
+        
+        buffer.push_str(&chunk_str);
 
         // Process complete SSE events (terminated by double newline)
         while let Some(event_end) = buffer.find("\n\n") {
@@ -671,12 +683,32 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
 
                         // Exit after processing all data in this chunk
                         if should_exit {
+                            // Debug: log exit reason
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/rustyclaw_sse_debug.log")
+                            {
+                                use std::io::Write;
+                                let _ = writeln!(f, "--- EXITING: finish_reason={:?}, tool_calls={} ---", finish_reason, tool_calls.len());
+                            }
                             break 'outer;
                         }
                     }
                 }
             }
         }
+    }
+
+    // Debug: log final state
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/rustyclaw_sse_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "--- FINAL: content_len={}, tool_calls={}, finish_reason={:?} ---", 
+            content.len(), tool_calls.len(), finish_reason);
     }
 
     // Build a standard OpenAI-style response object
