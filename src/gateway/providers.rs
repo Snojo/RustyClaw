@@ -32,6 +32,8 @@ pub async fn send_response_done(writer: &mut WsWriter) -> Result<()> {
 }
 
 /// Attach GitHub-Copilot-required IDE headers to a request builder.
+///
+/// Uses VS Code / Copilot Chat identifiers that GitHub's API recognizes.
 pub fn apply_copilot_headers(
     builder: reqwest::RequestBuilder,
     provider: &str,
@@ -39,11 +41,13 @@ pub fn apply_copilot_headers(
     if !providers::needs_copilot_session(provider) {
         return builder;
     }
-    let version = env!("CARGO_PKG_VERSION");
+    // GitHub Copilot requires recognized IDE headers.
+    // Using VS Code / Copilot Chat identifiers that the API accepts.
     builder
-        .header("Editor-Version", format!("RustyClaw/{}", version))
-        .header("Editor-Plugin-Version", format!("rustyclaw/{}", version))
-        .header("Copilot-Integration-Id", "rustyclaw")
+        .header("User-Agent", "GitHubCopilotChat/0.35.0")
+        .header("Editor-Version", "vscode/1.107.0")
+        .header("Editor-Plugin-Version", "copilot-chat/0.35.0")
+        .header("Copilot-Integration-Id", "vscode-chat")
         .header("openai-intent", "conversation-panel")
 }
 
