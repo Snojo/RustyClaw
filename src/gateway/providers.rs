@@ -779,10 +779,31 @@ pub async fn call_openai_with_tools(
     }
     builder = apply_copilot_headers(builder, &req.provider);
 
+    // Debug: log before HTTP request
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/rustyclaw_sse_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "=== SENDING REQUEST to {} ===", url);
+        let _ = writeln!(f, "Model: {}, Messages: {}", req.model, req.messages.len());
+    }
+
     let resp = builder
         .send()
         .await
         .context("HTTP request to model provider failed")?;
+
+    // Debug: log after HTTP response
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/rustyclaw_sse_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "=== GOT RESPONSE: {} ===", resp.status());
+    }
 
     if !resp.status().is_success() {
         let status = resp.status();
