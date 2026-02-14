@@ -899,6 +899,20 @@ pub async fn call_openai_with_tools(
         result.completion_tokens = usage["completion_tokens"].as_u64();
     }
 
+    // Debug: log final parsed result
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/rustyclaw_sse_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "=== PARSED RESULT: text_len={}, tool_calls={} ===", 
+            result.text.len(), result.tool_calls.len());
+        for tc in &result.tool_calls {
+            let _ = writeln!(f, "  Tool: {} (id: {})", tc.name, tc.id);
+        }
+    }
+
     Ok(result)
 }
 
