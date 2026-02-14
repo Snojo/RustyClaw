@@ -100,113 +100,141 @@ pub fn resolve_request(
 
 /// Append the model's assistant turn and tool results to the conversation
 /// so the next round has full context.
+/// Append a tool round to the conversation history.
+///
+/// This adds:
+/// 1. An assistant message with the model's text response and tool calls
+/// 2. Tool result message(s) with the execution results
+///
+/// The format varies by provider but the logic is unified here.
 pub fn append_tool_round(
     provider: &str,
     messages: &mut Vec<ChatMessage>,
     model_resp: &ModelResponse,
     results: &[ToolCallResult],
 ) {
-    if provider == "anthropic" {
-        // Anthropic: assistant message has content blocks (text + tool_use),
-        // then one "user" message with tool_result blocks.
-        let mut content_blocks = Vec::new();
-        if !model_resp.text.trim().is_empty() {
-            content_blocks.push(json!({ "type": "text", "text": model_resp.text }));
-        }
-        for tc in &model_resp.tool_calls {
-            content_blocks.push(json!({
-                "type": "tool_use",
-                "id": tc.id,
-                "name": tc.name,
-                "input": tc.arguments,
-            }));
-        }
-        messages.push(ChatMessage::text(
-            "assistant",
-            &serde_json::to_string(&content_blocks).unwrap_or_default(),
-        ));
+    // Build assistant message content based on provider format
+    let assistant_content = format_assistant_message(provider, model_resp);
+    messages.push(ChatMessage::text("assistant", &assistant_content));
 
-        let mut result_blocks = Vec::new();
-        for r in results {
-            result_blocks.push(json!({
-                "type": "tool_result",
-                "tool_use_id": r.id,
-                "content": r.output,
-                "is_error": r.is_error,
-            }));
-        }
-        messages.push(ChatMessage::text(
-            "user",
-            &serde_json::to_string(&result_blocks).unwrap_or_default(),
-        ));
-    } else if provider == "google" {
-        // Google: model turn with function calls, then user turn with function responses.
-        let mut parts = Vec::new();
-        if !model_resp.text.trim().is_empty() {
-            parts.push(json!({ "text": model_resp.text }));
-        }
-        for tc in &model_resp.tool_calls {
-            parts.push(json!({
-                "functionCall": { "name": tc.name, "args": tc.arguments }
-            }));
-        }
-        messages.push(ChatMessage::text(
-            "assistant",
-            &serde_json::to_string(&parts).unwrap_or_default(),
-        ));
+    // Build tool result message(s) based on provider format
+    let result_messages = format_tool_results(provider, results);
+    for (role, content) in result_messages {
+        messages.push(ChatMessage::text(&role, &content));
+    }
+}
 
-        let mut resp_parts = Vec::new();
-        for r in results {
-            resp_parts.push(json!({
-                "functionResponse": {
-                    "name": r.name,
-                    "response": { "content": r.output, "is_error": r.is_error }
-                }
-            }));
-        }
-        messages.push(ChatMessage::text(
-            "user",
-            &serde_json::to_string(&resp_parts).unwrap_or_default(),
-        ));
-    } else {
-        // OpenAI-compatible: assistant message with tool_calls array,
-        // then one "tool" message per result.
-        let tc_array: Vec<serde_json::Value> = model_resp
-            .tool_calls
-            .iter()
-            .map(|tc| {
-                json!({
+/// Format the assistant message containing text and tool calls.
+fn format_assistant_message(provider: &str, model_resp: &ModelResponse) -> String {
+    match provider {
+        "anthropic" => {
+            // Anthropic: array of content blocks (text + tool_use)
+            let mut blocks = Vec::new();
+            if !model_resp.text.trim().is_empty() {
+                blocks.push(json!({ "type": "text", "text": model_resp.text }));
+            }
+            for tc in &model_resp.tool_calls {
+                blocks.push(json!({
+                    "type": "tool_use",
                     "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                    }
+                    "name": tc.name,
+                    "input": tc.arguments,
+                }));
+            }
+            serde_json::to_string(&blocks).unwrap_or_default()
+        }
+        "google" => {
+            // Google: array of parts (text + functionCall)
+            let mut parts = Vec::new();
+            if !model_resp.text.trim().is_empty() {
+                parts.push(json!({ "text": model_resp.text }));
+            }
+            for tc in &model_resp.tool_calls {
+                parts.push(json!({
+                    "functionCall": { "name": tc.name, "args": tc.arguments }
+                }));
+            }
+            serde_json::to_string(&parts).unwrap_or_default()
+        }
+        _ => {
+            // OpenAI-compatible: object with role, content, tool_calls
+            let tc_array: Vec<serde_json::Value> = model_resp
+                .tool_calls
+                .iter()
+                .map(|tc| {
+                    json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                        }
+                    })
                 })
+                .collect();
+
+            json!({
+                "role": "assistant",
+                "content": if model_resp.text.trim().is_empty() { 
+                    serde_json::Value::Null 
+                } else { 
+                    json!(model_resp.text) 
+                },
+                "tool_calls": tc_array,
             })
-            .collect();
+            .to_string()
+        }
+    }
+}
 
-        // The assistant message carries both text and tool_calls.
-        let assistant_json = json!({
-            "role": "assistant",
-            "content": if model_resp.text.trim().is_empty() { serde_json::Value::Null } else { json!(model_resp.text) },
-            "tool_calls": tc_array,
-        });
-        messages.push(ChatMessage::text(
-            "assistant",
-            &serde_json::to_string(&assistant_json).unwrap_or_default(),
-        ));
-
-        for r in results {
-            messages.push(ChatMessage::text(
-                "tool",
-                &json!({
-                    "role": "tool",
-                    "tool_call_id": r.id,
-                    "content": r.output,
+/// Format tool results into message(s).
+/// Returns Vec of (role, content) pairs.
+fn format_tool_results(provider: &str, results: &[ToolCallResult]) -> Vec<(String, String)> {
+    match provider {
+        "anthropic" => {
+            // Anthropic: single "user" message with array of tool_result blocks
+            let blocks: Vec<serde_json::Value> = results
+                .iter()
+                .map(|r| {
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": r.id,
+                        "content": r.output,
+                        "is_error": r.is_error,
+                    })
                 })
-                .to_string(),
-            ));
+                .collect();
+            vec![("user".to_string(), serde_json::to_string(&blocks).unwrap_or_default())]
+        }
+        "google" => {
+            // Google: single "user" message with array of functionResponse parts
+            let parts: Vec<serde_json::Value> = results
+                .iter()
+                .map(|r| {
+                    json!({
+                        "functionResponse": {
+                            "name": r.name,
+                            "response": { "content": r.output, "is_error": r.is_error }
+                        }
+                    })
+                })
+                .collect();
+            vec![("user".to_string(), serde_json::to_string(&parts).unwrap_or_default())]
+        }
+        _ => {
+            // OpenAI-compatible: one "tool" message per result
+            results
+                .iter()
+                .map(|r| {
+                    let content = json!({
+                        "role": "tool",
+                        "tool_call_id": r.id,
+                        "content": r.output,
+                    })
+                    .to_string();
+                    ("tool".to_string(), content)
+                })
+                .collect()
         }
     }
 }
