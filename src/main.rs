@@ -1471,7 +1471,7 @@ fn run_import(args: &ImportArgs, config: &mut Config) -> Result<()> {
         config.settings_dir = target_dir.clone();
         config.workspace_dir = Some(target_workspace.clone());
         config.credentials_dir = Some(target_credentials);
-        config.save(Some(target_dir.join("rustyclaw.toml")))?;
+        config.save(Some(target_dir.join("config.toml")))?;
     }
 
     // ── Summary ─────────────────────────────────────────────────────────
@@ -1496,7 +1496,7 @@ fn run_import(args: &ImportArgs, config: &mut Config) -> Result<()> {
         println!("{}", "Run without --dry-run to apply changes.".dimmed());
     } else {
         println!();
-        println!("{} Saved to {}", "✓".green(), target_dir.join("rustyclaw.toml").display());
+        println!("{} Saved to {}", "✓".green(), target_dir.join("config.toml").display());
         println!();
         println!(
             "{} Run {} to launch your agent!",
