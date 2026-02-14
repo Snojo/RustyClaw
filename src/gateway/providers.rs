@@ -614,9 +614,13 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
         // Wait for next chunk with timeout
         let chunk_result = match timeout(chunk_timeout, stream.next()).await {
             Ok(Some(result)) => result,
-            Ok(None) => break 'outer, // Stream ended normally
+            Ok(None) => {
+                eprintln!("[SSE] Stream ended normally (None)");
+                break 'outer;
+            }
             Err(_) => {
                 // Timeout — stream stalled, return what we have
+                eprintln!("[SSE] Stream timeout after {}s", chunk_timeout.as_secs());
                 break 'outer;
             }
         };
@@ -635,6 +639,7 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data.trim() == "[DONE]" {
                         // Stream complete — exit all loops
+                        eprintln!("[SSE] Received [DONE], content len={}, tool_calls={}", content.len(), tool_calls.len());
                         break 'outer;
                     }
 
@@ -704,6 +709,10 @@ async fn consume_sse_stream(resp: reqwest::Response) -> Result<serde_json::Value
                                     finish_reason = Some(fr.to_string());
                                     // Terminal reasons mean the model is done
                                     if fr == "stop" || fr == "tool_calls" || fr == "tool_use" || fr == "length" || fr == "end_turn" {
+                                        eprintln!(
+                                            "[SSE] finish_reason='{}', content len={}, tool_calls={}",
+                                            fr, content.len(), tool_calls.len()
+                                        );
                                         should_exit = true;
                                     }
                                 }
