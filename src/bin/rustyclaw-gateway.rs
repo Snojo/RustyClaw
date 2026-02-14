@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
             }
         } else {
             // Resolve from the vault.
-            let mut v = shared_vault.blocking_lock();
+            let mut v = shared_vault.lock().await;
             match ModelContext::resolve(&config, &mut v) {
                 Ok(ctx) => {
                     println!(
