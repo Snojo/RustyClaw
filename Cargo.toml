@@ -93,7 +93,7 @@ urlencoding = "2.1"
 
 # Time handling
 chrono = "0.4"
-zip = "7.4.0"
+zip = "8.0"
 
 # Base64 encoding for image data
 base64 = "0.22"
