@@ -878,6 +878,9 @@ impl App {
             .as_ref()
             .and_then(|v| v.get("type").and_then(|t| t.as_str()));
 
+        // Debug: log all incoming frames
+        eprintln!("[TUI] Received frame: type={:?}, len={}", frame_type, text.len());
+
         // ── Handle status frames from the gateway ────────────
         if frame_type == Some("status") {
             let status = parsed
@@ -1114,8 +1117,11 @@ impl App {
                 .and_then(|v| v.get("delta").and_then(|d| d.as_str()))
                 .unwrap_or("");
 
+            eprintln!("[TUI] Received chunk: {} chars, delta='{}'", delta.len(), &delta[..delta.len().min(50)]);
+
             if self.streaming_response.is_none() {
                 // First chunk — clear the loading spinner and start accumulating.
+                eprintln!("[TUI] First chunk - initializing streaming response");
                 self.state.loading_line = None;
                 self.streaming_response = Some(String::new());
                 self.state.streaming_started = Some(std::time::Instant::now());
