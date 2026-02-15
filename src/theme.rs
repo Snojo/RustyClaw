@@ -394,4 +394,41 @@ pub mod tui_palette {
     pub const fn gateway_message() -> Style {
         Style::new().fg(TEXT)
     }
+
+    // ── Markdown StyleSheet for tui-markdown ────────────────────
+
+    /// Custom stylesheet for markdown rendering that uses the lobster palette.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct RustyClawMarkdownStyle;
+
+    impl tui_markdown::StyleSheet for RustyClawMarkdownStyle {
+        fn heading(&self, level: u8) -> Style {
+            match level {
+                1 => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                2 => Style::new().fg(ACCENT_BRIGHT).add_modifier(Modifier::BOLD),
+                3 => Style::new().fg(ACCENT_DIM).add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                _ => Style::new().fg(INFO).add_modifier(Modifier::ITALIC),
+            }
+        }
+
+        fn code(&self) -> Style {
+            Style::new().fg(TEXT).bg(BG_CODE)
+        }
+
+        fn link(&self) -> Style {
+            Style::new().fg(INFO).add_modifier(Modifier::UNDERLINED)
+        }
+
+        fn blockquote(&self) -> Style {
+            Style::new().fg(MUTED).add_modifier(Modifier::ITALIC)
+        }
+
+        fn heading_meta(&self) -> Style {
+            Style::new().fg(TEXT_DIM).add_modifier(Modifier::DIM)
+        }
+
+        fn metadata_block(&self) -> Style {
+            Style::new().fg(WARN)
+        }
+    }
 }
