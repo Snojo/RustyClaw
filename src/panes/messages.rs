@@ -1,4 +1,3 @@
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicU16;
 
 use anyhow::Result;
@@ -7,33 +6,16 @@ use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
 };
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{self, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use tui_markdown::{from_str_with_options, Options};
 
 use crate::action::Action;
 use crate::panes::{DisplayMessage, MessageRole, Pane, PaneState};
-use crate::theme::tui_palette as tp;
+use crate::theme::tui_palette::{self as tp, RustyClawMarkdownStyle};
 use crate::tui::Frame;
 
 // ── Global tab-width setting (read by build_lines) ──────────────────────
 
 static TAB_WIDTH: AtomicU16 = AtomicU16::new(5);
-
-// ── Lazy-loaded syntect state ───────────────────────────────────────────
-
-fn syntax_set() -> &'static SyntaxSet {
-    static SS: OnceLock<SyntaxSet> = OnceLock::new();
-    SS.get_or_init(SyntaxSet::load_defaults_newlines)
-}
-
-fn highlight_theme() -> &'static highlighting::Theme {
-    static TH: OnceLock<highlighting::Theme> = OnceLock::new();
-    TH.get_or_init(|| {
-        let ts = ThemeSet::load_defaults();
-        ts.themes["base16-ocean.dark"].clone()
-    })
-}
 
 pub struct MessagesPane {
     focused: bool,
@@ -120,184 +102,26 @@ impl MessagesPane {
         Ok(())
     }
 
-    /// Parse inline markdown into styled [`Span`]s.
-    ///
-    /// Supports: **bold**, *italic*, `code`, and ### headings (prefix only).
-    fn parse_inline_markdown(text: &str, base_color: Color) -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-
-        // Handle heading prefixes
-        let text = if text.starts_with("### ") {
-            spans.push(Span::styled(
-                "▎ ",
-                Style::default().fg(tp::ACCENT_DIM),
-            ));
-            &text[4..]
-        } else if text.starts_with("## ") {
-            spans.push(Span::styled(
-                "▎ ",
-                Style::default()
-                    .fg(tp::ACCENT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            &text[3..]
-        } else if text.starts_with("# ") {
-            spans.push(Span::styled(
-                "▎ ",
-                Style::default()
-                    .fg(tp::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            &text[2..]
-        } else {
-            text
-        };
-
-        let chars: Vec<char> = text.chars().collect();
-        let len = chars.len();
-        let mut i = 0;
-        let mut buf = String::new();
-
-        let base = Style::default().fg(base_color);
-        let bold = base.add_modifier(Modifier::BOLD);
-        let italic = base.add_modifier(Modifier::ITALIC);
-        let code = Style::default()
-            .fg(tp::ACCENT_BRIGHT)
-            .bg(tp::SURFACE_BRIGHT);
-
-        while i < len {
-            // Backtick code
-            if chars[i] == '`' {
-                if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), base));
-                    buf.clear();
-                }
-                i += 1;
-                let start = i;
-                while i < len && chars[i] != '`' {
-                    i += 1;
-                }
-                let code_text: String = chars[start..i].iter().collect();
-                spans.push(Span::styled(format!(" {} ", code_text), code));
-                if i < len {
-                    i += 1; // skip closing `
-                }
-                continue;
-            }
-
-            // **bold**
-            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-                if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), base));
-                    buf.clear();
-                }
-                i += 2;
-                let start = i;
-                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
-                    i += 1;
-                }
-                let bold_text: String = chars[start..i].iter().collect();
-                spans.push(Span::styled(bold_text, bold));
-                if i + 1 < len {
-                    i += 2; // skip closing **
-                }
-                continue;
-            }
-
-            // *italic*
-            if chars[i] == '*' {
-                if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), base));
-                    buf.clear();
-                }
-                i += 1;
-                let start = i;
-                while i < len && chars[i] != '*' {
-                    i += 1;
-                }
-                let italic_text: String = chars[start..i].iter().collect();
-                spans.push(Span::styled(italic_text, italic));
-                if i < len {
-                    i += 1; // skip closing *
-                }
-                continue;
-            }
-
-            buf.push(chars[i]);
-            i += 1;
-        }
-
-        if !buf.is_empty() {
-            spans.push(Span::styled(buf, base));
-        }
-
-        spans
-    }
-
-    // ── Syntax highlighting ─────────────────────────────────────────────
-
-    /// Convert a syntect `highlighting::Style` to a ratatui `Style`.
-    fn syntect_to_ratatui(ss: highlighting::Style) -> Style {
-        let fg = Color::Rgb(ss.foreground.r, ss.foreground.g, ss.foreground.b);
-        Style::default().fg(fg).bg(tp::BG_CODE)
-    }
-
-    /// Syntax-highlight a block of code lines using syntect.
-    fn highlight_code_block(lines: &[&str], lang: &str) -> Vec<Line<'static>> {
-        let ss = syntax_set();
-        let theme = highlight_theme();
-
-        let syntax = ss
-            .find_syntax_by_token(lang)
-            .unwrap_or_else(|| ss.find_syntax_plain_text());
-
-        let mut h = HighlightLines::new(syntax, theme);
-        let mut result = Vec::new();
-
-        for source_line in lines {
-            // syntect expects the newline; add it back for parsing
-            let input = format!("{source_line}\n");
-            let ranges = h
-                .highlight_line(&input, ss)
-                .unwrap_or_default();
-
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            // Left gutter
-            spans.push(Span::styled("  ", Style::default().bg(tp::BG_CODE)));
-            for (style, text) in ranges {
-                // Strip the trailing newline we added
-                let t = text.trim_end_matches('\n').to_string();
-                if !t.is_empty() {
-                    spans.push(Span::styled(t, Self::syntect_to_ratatui(style)));
-                }
-            }
-            result.push(Line::from(spans));
-        }
-
-        result
-    }
-
     // ── Layout helpers ──────────────────────────────────────────────────
 
     /// Build styled [`Line`]s for a single message.
     ///
-    /// Multi-line content (e.g. assistant responses) is split on `\n`.
-    /// Fenced code blocks (` ```lang … ``` `) get syntax highlighting.
+    /// Uses tui-markdown for full CommonMark support (headings, bold, italic,
+    /// code blocks, lists, tables, links, blockquotes, etc.)
     fn build_lines(msg: &DisplayMessage) -> Vec<Line<'static>> {
         // Expand tab characters to spaces (default 5).
         let tab_stop = TAB_WIDTH.load(std::sync::atomic::Ordering::Relaxed) as usize;
-        let content: std::borrow::Cow<'_, str> = if msg.content.contains('\t') {
-            std::borrow::Cow::Owned(msg.content.replace('\t', &" ".repeat(tab_stop)))
+        let content: String = if msg.content.contains('\t') {
+            msg.content.replace('\t', &" ".repeat(tab_stop))
         } else {
-            std::borrow::Cow::Borrowed(&msg.content)
+            msg.content.clone()
         };
-        let msg = &DisplayMessage { content: content.into_owned(), ..msg.clone() };
 
         let color = Self::role_color(&msg.role);
         let is_assistant = matches!(msg.role, MessageRole::Assistant);
 
         if !is_assistant {
-            // Non-assistant messages stay single-line.
+            // Non-assistant messages stay single-line (no markdown processing).
             let mut spans: Vec<Span<'static>> = Vec::new();
             spans.push(Span::raw(" "));
             if Self::should_show_icon(&msg.role) {
@@ -307,75 +131,31 @@ impl MessagesPane {
                     Style::default().fg(color),
                 ));
             }
-            spans.push(Span::styled(
-                msg.content.clone(),
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(content, Style::default().fg(color)));
             return vec![Line::from(spans)];
         }
 
-        // ── Assistant: handle multi-line with code fences ────────────
+        // ── Assistant: use tui-markdown for full CommonMark rendering ──
 
-        let raw_lines: Vec<&str> = msg.content.split('\n').collect();
-        let mut result: Vec<Line<'static>> = Vec::new();
-        let mut i = 0;
+        // Convert markdown to ratatui Text using tui-markdown with our custom style
+        let options = Options::new(RustyClawMarkdownStyle);
+        let text = from_str_with_options(&content, &options);
 
-        while i < raw_lines.len() {
-            let line = raw_lines[i];
-
-            // Detect opening code fence: ```lang
-            if line.trim_start().starts_with("```") {
-                let trimmed = line.trim_start();
-                let lang = trimmed[3..].trim().to_string();
-
-                // Fence header line (dimmed)
-                let fence_label = if lang.is_empty() {
-                    " ─── code ───".to_string()
-                } else {
-                    format!(" ─── {} ───", lang)
-                };
-                result.push(Line::from(Span::styled(
-                    fence_label,
-                    Style::default().fg(tp::MUTED).bg(tp::BG_CODE),
-                )));
-
-                // Collect code body
-                i += 1;
-                let mut code_lines: Vec<&str> = Vec::new();
-                while i < raw_lines.len() {
-                    if raw_lines[i].trim_start().starts_with("```") {
-                        break;
-                    }
-                    code_lines.push(raw_lines[i]);
-                    i += 1;
+        // Add a leading space to each line for padding, and convert to owned strings
+        text.lines
+            .into_iter()
+            .map(|line| {
+                let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+                // Convert each span's content to an owned String
+                for span in line.spans {
+                    spans.push(Span::styled(
+                        span.content.into_owned(),
+                        span.style,
+                    ));
                 }
-
-                // Highlight the code body
-                let lang_ref = if lang.is_empty() { "txt" } else { &lang };
-                result.extend(Self::highlight_code_block(&code_lines, lang_ref));
-
-                // Closing fence line
-                result.push(Line::from(Span::styled(
-                    " ───────────",
-                    Style::default().fg(tp::MUTED).bg(tp::BG_CODE),
-                )));
-
-                // Skip closing ``` line
-                if i < raw_lines.len() {
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Normal markdown line
-            let mut spans = Vec::new();
-            spans.push(Span::raw(" "));
-            spans.extend(Self::parse_inline_markdown(line, color));
-            result.push(Line::from(spans));
-            i += 1;
-        }
-
-        result
+                Line::from(spans)
+            })
+            .collect()
     }
 
     /// Count how many visual (wrapped) rows a set of `Line`s occupies at `width`.
