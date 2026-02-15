@@ -38,6 +38,9 @@ full = ["tui", "web-tools", "matrix", "browser"]
 # See BUILDING.md for instructions on building with Signal support.
 # signal = ["dep:presage", "dep:presage-store-sqlite"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("signal"))'] }
+
 [dependencies]
 # TUI dependencies (optional — disable with --no-default-features for headless builds)
 ratatui = { version = "0.30", optional = true }
