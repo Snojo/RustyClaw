@@ -1092,6 +1092,9 @@ pub async fn call_anthropic_with_tools(
                 }
             }
 
+            // Debug: log event types we receive
+            eprintln!("[Anthropic SSE] event_type='{}', data_len={}", event_type, event_data.len());
+
             if event_data.is_empty() {
                 continue;
             }
@@ -1211,11 +1214,21 @@ pub async fn call_anthropic_with_tools(
                             .unwrap_or("Unknown error");
                         anyhow::bail!("Anthropic stream error: {}", msg);
                     }
-                    _ => {}
+                    _ => {
+                        eprintln!("[Anthropic SSE] Unhandled event type: '{}'", event_type);
+                    }
                 }
             }
         }
     }
+
+    // Debug: log final result
+    eprintln!(
+        "[Anthropic SSE] Stream complete: text_len={}, tool_calls={}, finish_reason={:?}",
+        result.text.len(),
+        result.tool_calls.len(),
+        result.finish_reason
+    );
 
     Ok(result)
 }
