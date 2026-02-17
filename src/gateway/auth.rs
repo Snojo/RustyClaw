@@ -8,7 +8,8 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use super::{CopilotSession, ClientFrame, ClientFrameType, ClientPayload, deserialize_frame};
+use super::protocol::server;
+use super::{CopilotSession, ClientFrame, ClientFrameType, ClientPayload};
 use crate::providers;
 
 /// Maximum consecutive TOTP failures before lockout.
@@ -125,7 +126,7 @@ pub async fn wait_for_auth_response(
         match msg {
             Ok(Message::Binary(data)) => {
                 // Deserialize bincode frame
-                match deserialize_frame::<ClientFrame>(&data) {
+                match server::parse_client_frame(&data) {
                     Ok(frame) => {
                         if frame.frame_type == ClientFrameType::AuthResponse {
                             if let ClientPayload::AuthResponse { code } = frame.payload {

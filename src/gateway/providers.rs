@@ -3,11 +3,12 @@ use futures_util::SinkExt;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
 
+use super::protocol::server;
 use super::types::{
     ChatMessage, CopilotSession, ModelContext, ModelResponse, ParsedToolCall, ProviderRequest,
     ProbeResult, ToolCallResult,
 };
-use super::{ServerFrame, ServerFrameType, ServerPayload, WsWriter, serialize_frame};
+use super::{ServerFrame, ServerFrameType, ServerPayload, WsWriter};
 use crate::providers;
 use crate::tools;
 
@@ -67,15 +68,7 @@ pub async fn send_with_retry(
 
 /// Send a single chunk frame as binary.
 pub async fn send_chunk(writer: &mut WsWriter, delta: &str) -> Result<()> {
-    let frame = ServerFrame {
-        frame_type: ServerFrameType::Chunk,
-        payload: ServerPayload::Chunk { delta: delta.to_string() },
-    };
-    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
-    writer
-        .send(Message::Binary(bytes.into()))
-        .await
-        .context("Failed to send chunk frame")
+    server::send_chunk(writer, delta).await.context("Failed to send chunk frame")
 }
 
 /// Send a thinking_start frame as binary.
@@ -84,11 +77,7 @@ pub async fn send_thinking_start(writer: &mut WsWriter) -> Result<()> {
         frame_type: ServerFrameType::ThinkingStart,
         payload: ServerPayload::ThinkingStart,
     };
-    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
-    writer
-        .send(Message::Binary(bytes.into()))
-        .await
-        .context("Failed to send thinking_start frame")
+    server::send_frame(writer, &frame).await.context("Failed to send thinking_start frame")
 }
 
 /// Send a thinking_delta frame as binary.
@@ -97,37 +86,21 @@ pub async fn send_thinking_delta(writer: &mut WsWriter, delta: &str) -> Result<(
         frame_type: ServerFrameType::ThinkingDelta,
         payload: ServerPayload::ThinkingDelta { delta: delta.to_string() },
     };
-    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
-    writer
-        .send(Message::Binary(bytes.into()))
-        .await
-        .context("Failed to send thinking_delta frame")
+    server::send_frame(writer, &frame).await.context("Failed to send thinking_delta frame")
 }
 
 /// Send a thinking_end frame as binary.
-pub async fn send_thinking_end(writer: &mut WsWriter, summary: Option<&str>) -> Result<()> {
+pub async fn send_thinking_end(writer: &mut WsWriter, _summary: Option<&str>) -> Result<()> {
     let frame = ServerFrame {
         frame_type: ServerFrameType::ThinkingEnd,
         payload: ServerPayload::ThinkingEnd,
     };
-    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
-    writer
-        .send(Message::Binary(bytes.into()))
-        .await
-        .context("Failed to send thinking_end frame")
+    server::send_frame(writer, &frame).await.context("Failed to send thinking_end frame")
 }
 
 /// Send the response_done sentinel frame as binary.
 pub async fn send_response_done(writer: &mut WsWriter) -> Result<()> {
-    let frame = ServerFrame {
-        frame_type: ServerFrameType::ResponseDone,
-        payload: ServerPayload::ResponseDone { ok: true },
-    };
-    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
-    writer
-        .send(Message::Binary(bytes.into()))
-        .await
-        .context("Failed to send response_done frame")
+    server::send_response_done(writer, true).await.context("Failed to send response_done frame")
 }
 
 /// Attach GitHub-Copilot-required IDE headers to a request builder.

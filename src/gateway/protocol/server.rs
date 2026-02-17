@@ -9,17 +9,17 @@ use anyhow::Result;
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message;
 
-pub type WsWriter = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
-
 /// Send a ServerFrame as a binary WebSocket message.
-pub async fn send_frame(writer: &mut WsWriter, frame: &ServerFrame) -> Result<()> {
+/// Works with any sink that accepts Binary messages.
+pub async fn send_frame<S>(writer: &mut S, frame: &ServerFrame) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let bytes = serialize_frame(frame).map_err(|e| anyhow::anyhow!("serialize failed: {}", e))?;
     writer
         .send(Message::Binary(bytes.into()))
         .await
-        .map_err(|e| anyhow::anyhow!("send failed: {}", e))
+        .map_err(|e| anyhow::anyhow!("send failed"))
 }
 
 /// Parse a ClientFrame from binary WebSocket message bytes.
@@ -28,14 +28,17 @@ pub fn parse_client_frame(bytes: &[u8]) -> Result<ClientFrame> {
 }
 
 /// Helper to send a hello frame.
-pub async fn send_hello(
-    writer: &mut WsWriter,
+pub async fn send_hello<S>(
+    writer: &mut S,
     agent: &str,
     settings_dir: &str,
     vault_locked: bool,
     provider: Option<&str>,
     model: Option<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::Hello,
         payload: ServerPayload::Hello {
@@ -50,7 +53,10 @@ pub async fn send_hello(
 }
 
 /// Helper to send an auth challenge frame.
-pub async fn send_auth_challenge(writer: &mut WsWriter, method: &str) -> Result<()> {
+pub async fn send_auth_challenge<S>(writer: &mut S, method: &str) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::AuthChallenge,
         payload: ServerPayload::AuthChallenge {
@@ -61,12 +67,15 @@ pub async fn send_auth_challenge(writer: &mut WsWriter, method: &str) -> Result<
 }
 
 /// Helper to send an auth result frame.
-pub async fn send_auth_result(
-    writer: &mut WsWriter,
+pub async fn send_auth_result<S>(
+    writer: &mut S,
     ok: bool,
     message: Option<&str>,
     retry: Option<bool>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::AuthResult,
         payload: ServerPayload::AuthResult {
@@ -79,7 +88,10 @@ pub async fn send_auth_result(
 }
 
 /// Helper to send an error frame.
-pub async fn send_error(writer: &mut WsWriter, message: &str) -> Result<()> {
+pub async fn send_error<S>(writer: &mut S, message: &str) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::Error,
         payload: ServerPayload::Error {
@@ -91,7 +103,10 @@ pub async fn send_error(writer: &mut WsWriter, message: &str) -> Result<()> {
 }
 
 /// Helper to send an info frame.
-pub async fn send_info(writer: &mut WsWriter, message: &str) -> Result<()> {
+pub async fn send_info<S>(writer: &mut S, message: &str) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::Info,
         payload: ServerPayload::Info {
@@ -102,11 +117,14 @@ pub async fn send_info(writer: &mut WsWriter, message: &str) -> Result<()> {
 }
 
 /// Helper to send a status frame.
-pub async fn send_status(
-    writer: &mut WsWriter,
+pub async fn send_status<S>(
+    writer: &mut S,
     status: super::frames::StatusType,
     detail: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::Status,
         payload: ServerPayload::Status {
@@ -118,7 +136,10 @@ pub async fn send_status(
 }
 
 /// Helper to send a chunk frame.
-pub async fn send_chunk(writer: &mut WsWriter, delta: &str) -> Result<()> {
+pub async fn send_chunk<S>(writer: &mut S, delta: &str) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::Chunk,
         payload: ServerPayload::Chunk {
@@ -129,7 +150,10 @@ pub async fn send_chunk(writer: &mut WsWriter, delta: &str) -> Result<()> {
 }
 
 /// Helper to send a response done frame.
-pub async fn send_response_done(writer: &mut WsWriter, ok: bool) -> Result<()> {
+pub async fn send_response_done<S>(writer: &mut S, ok: bool) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame = ServerFrame {
         frame_type: ServerFrameType::ResponseDone,
         payload: ServerPayload::ResponseDone { ok },
