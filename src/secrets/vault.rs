@@ -463,7 +463,7 @@ impl SecretsManager {
                     crate::providers::AuthMethod::DeviceFlow => SecretKind::Token,
                     _ => SecretKind::ApiKey,
                 };
-                return (format!("{}", p.display), kind);
+                return (p.display.to_string(), kind);
             }
         }
         // Fallback: humanise the key name.

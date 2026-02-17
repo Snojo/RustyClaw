@@ -644,7 +644,7 @@ fn call_google_vision(api_key: &str, image_data: &str, is_url: bool, prompt: &st
         // Extract base64 and mime type from data URL
         let parts: Vec<&str> = image_data.split(",").collect();
         let base64_data = parts.get(1).unwrap_or(&"");
-        let mime_type = parts.get(0)
+        let mime_type = parts.first()
             .and_then(|p| p.strip_prefix("data:"))
             .and_then(|p| p.split(";").next())
             .unwrap_or("image/jpeg");

@@ -714,7 +714,7 @@ pub fn extract_paths_from_command(command: &str) -> Vec<PathBuf> {
     let mut in_quotes = false;
     let mut quote_char = ' ';
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '\'' | '"' => {
                 if in_quotes && ch == quote_char {

@@ -660,7 +660,7 @@ async fn handle_connection(
                                 }
                             }
                             // Forward binary messages
-                            if msg_tx.send(Message::Binary(data.clone().into())).await.is_err() {
+                            if msg_tx.send(Message::Binary(data.clone())).await.is_err() {
                                 break;
                             }
                         }

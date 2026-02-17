@@ -141,8 +141,7 @@ fn parse_node(node: &str) -> NodeType {
     if node.starts_with("adb:") {
         return NodeType::Adb { device: node[4..].to_string() };
     }
-    if node.starts_with("ssh:") {
-        let rest = &node[4..];
+    if let Some(rest) = node.strip_prefix("ssh:") {
         return parse_ssh_target(rest);
     }
     if node.starts_with("vnc:") {
@@ -389,7 +388,7 @@ fn node_describe(node: &str) -> Result<String, String> {
                         "type": "adb",
                         "device": device,
                         "status": "connected",
-                        "model": lines.get(0).unwrap_or(&""),
+                        "model": lines.first().unwrap_or(&""),
                         "android_version": lines.get(1).unwrap_or(&""),
                         "serial": lines.get(2).unwrap_or(&"")
                     }).to_string())
@@ -421,7 +420,7 @@ fn node_describe(node: &str) -> Result<String, String> {
                 "type": "vnc",
                 "host": host,
                 "port": port,
-                "display": if port >= 5900 { port - 5900 } else { 0 },
+                "display": port.saturating_sub(5900),
                 "status": if reachable { "reachable" } else { "unknown" },
                 "tools": {
                     "vncdo": which::which("vncdo").is_ok(),

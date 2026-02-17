@@ -569,8 +569,8 @@ impl App {
                 return Ok(None);
             }
             Action::ConfirmStoreSecret { provider, key } => {
-                let secret_key = providers::secret_key_for_provider(&provider).unwrap_or("API_KEY");
-                let display = providers::display_name_for_provider(&provider).to_string();
+                let secret_key = providers::secret_key_for_provider(provider).unwrap_or("API_KEY");
+                let display = providers::display_name_for_provider(provider).to_string();
                 let frame = serde_json::json!({
                     "type": "secrets_store",
                     "key": secret_key,

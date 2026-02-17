@@ -67,11 +67,13 @@ impl SecretKind {
 /// Controls *when* the agent is allowed to read a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AccessPolicy {
     /// The agent may read this secret at any time without prompting.
     Always,
     /// The agent may read this secret only with explicit per-use user
     /// approval (e.g. a "yes/no" confirmation in the TUI).
+    #[default]
     WithApproval,
     /// The agent must re-authenticate (vault password and/or TOTP)
     /// before each access.
@@ -82,11 +84,6 @@ pub enum AccessPolicy {
     SkillOnly(Vec<String>),
 }
 
-impl Default for AccessPolicy {
-    fn default() -> Self {
-        Self::WithApproval
-    }
-}
 
 impl std::fmt::Display for AccessPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -245,9 +242,8 @@ impl Cookie {
         let cookie_domain = self.domain.to_lowercase();
         let req_domain = request_domain.to_lowercase();
 
-        if cookie_domain.starts_with('.') {
+        if let Some(suffix) = cookie_domain.strip_prefix('.') {
             // Subdomain matching: .example.com matches foo.example.com
-            let suffix = &cookie_domain[1..];
             req_domain == suffix || req_domain.ends_with(&format!(".{}", suffix))
         } else {
             // Exact match only
@@ -368,7 +364,7 @@ impl BrowserStore {
         let domain_lower = domain.to_lowercase();
         let mut result = Vec::new();
 
-        for (_stored_domain, cookies) in &self.cookies {
+        for cookies in self.cookies.values() {
             for cookie in cookies {
                 if !cookie.is_expired()
                     && cookie.matches_domain(&domain_lower)

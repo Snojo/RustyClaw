@@ -1767,10 +1767,10 @@ fn run_import(args: &ImportArgs, config: &mut Config) -> Result<()> {
     );
 
     if config.secrets_password_protected {
-        println!("  {} Vault is password-protected", "🔒");
+        println!("  🔒 Vault is password-protected");
     }
     if config.totp_enabled {
-        println!("  {} 2FA is enabled", "🔐");
+        println!("  🔐 2FA is enabled");
     }
 
     if args.dry_run {

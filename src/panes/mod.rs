@@ -112,10 +112,9 @@ fn fix_bare_code_fences(content: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim_start();
         
-        if trimmed.starts_with("```") {
+        if let Some(after_fence) = trimmed.strip_prefix("```") {
             if !in_code_block {
                 // Opening fence - check if it has a language
-                let after_fence = &trimmed[3..];
                 if after_fence.is_empty() || after_fence.chars().next().map(|c| c.is_whitespace()).unwrap_or(true) {
                     // Bare fence or fence followed by whitespace - add "text" language
                     let prefix = &line[..line.len() - trimmed.len()]; // preserve leading whitespace
