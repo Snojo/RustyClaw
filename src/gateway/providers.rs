@@ -7,7 +7,7 @@ use super::types::{
     ChatMessage, CopilotSession, ModelContext, ModelResponse, ParsedToolCall, ProviderRequest,
     ProbeResult, ToolCallResult,
 };
-use super::WsWriter;
+use super::{ServerFrame, ServerFrameType, ServerPayload, WsWriter, serialize_frame};
 use crate::providers;
 use crate::tools;
 
@@ -65,50 +65,67 @@ pub async fn send_with_retry(
 
 // ── Streaming helpers ───────────────────────────────────────────────────────
 
-/// Send a single `{"type": "chunk", "delta": "..."}` frame.
+/// Send a single chunk frame as binary.
 pub async fn send_chunk(writer: &mut WsWriter, delta: &str) -> Result<()> {
-    let frame = json!({ "type": "chunk", "delta": delta });
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::Chunk,
+        payload: ServerPayload::Chunk { delta: delta.to_string() },
+    };
+    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
     writer
-        .send(Message::Text(frame.to_string().into()))
+        .send(Message::Binary(bytes.into()))
         .await
         .context("Failed to send chunk frame")
 }
 
-/// Send a `{"type": "thinking_start"}` frame to indicate extended thinking has begun.
+/// Send a thinking_start frame as binary.
 pub async fn send_thinking_start(writer: &mut WsWriter) -> Result<()> {
-    let frame = json!({ "type": "thinking_start" });
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::ThinkingStart,
+        payload: ServerPayload::ThinkingStart,
+    };
+    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
     writer
-        .send(Message::Text(frame.to_string().into()))
+        .send(Message::Binary(bytes.into()))
         .await
         .context("Failed to send thinking_start frame")
 }
 
-/// Send a `{"type": "thinking_delta", "delta": "..."}` frame for streaming thinking content.
+/// Send a thinking_delta frame as binary.
 pub async fn send_thinking_delta(writer: &mut WsWriter, delta: &str) -> Result<()> {
-    let frame = json!({ "type": "thinking_delta", "delta": delta });
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::ThinkingDelta,
+        payload: ServerPayload::ThinkingDelta { delta: delta.to_string() },
+    };
+    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
     writer
-        .send(Message::Text(frame.to_string().into()))
+        .send(Message::Binary(bytes.into()))
         .await
         .context("Failed to send thinking_delta frame")
 }
 
-/// Send a `{"type": "thinking_end"}` frame to indicate extended thinking has finished.
+/// Send a thinking_end frame as binary.
 pub async fn send_thinking_end(writer: &mut WsWriter, summary: Option<&str>) -> Result<()> {
-    let mut frame = json!({ "type": "thinking_end" });
-    if let Some(s) = summary {
-        frame["summary"] = json!(s);
-    }
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::ThinkingEnd,
+        payload: ServerPayload::ThinkingEnd,
+    };
+    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
     writer
-        .send(Message::Text(frame.to_string().into()))
+        .send(Message::Binary(bytes.into()))
         .await
         .context("Failed to send thinking_end frame")
 }
 
-/// Send the `{"type": "response_done"}` sentinel frame.
+/// Send the response_done sentinel frame as binary.
 pub async fn send_response_done(writer: &mut WsWriter) -> Result<()> {
-    let frame = json!({ "type": "response_done", "ok": true });
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::ResponseDone,
+        payload: ServerPayload::ResponseDone { ok: true },
+    };
+    let bytes = serialize_frame(&frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
     writer
-        .send(Message::Text(frame.to_string().into()))
+        .send(Message::Binary(bytes.into()))
         .await
         .context("Failed to send response_done frame")
 }

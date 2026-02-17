@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -1363,7 +1361,7 @@ impl App {
 
             if let Some(buf) = self.streaming_response.take() {
                 debug!(buf_len = buf.len(), showing_hatching = self.showing_hatching, "Response done");
-                
+
                 // During hatching, deliver the full accumulated text
                 // to the hatching page instead of the messages pane.
                 if self.showing_hatching {
@@ -1379,7 +1377,7 @@ impl App {
                 // Trim trailing whitespace from the final message.
                 let trimmed = buf.trim_end().to_string();
                 debug!(trimmed_len = trimmed.len(), messages_count = self.state.messages.len(), "Response done");
-                
+
                 if let Some(last) = self.state.messages.last_mut() {
                     debug!(role = ?last.role, "Response done - last message role");
                     if matches!(last.role, crate::panes::MessageRole::Assistant) {
@@ -1959,7 +1957,13 @@ impl App {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(Message::Text(text)) => {
+                    // Handle text messages (backwards compatibility)
                     let _ = tx.send(Action::GatewayMessage(text.to_string()));
+                }
+                Ok(Message::Binary(data)) => {
+                    // Handle binary messages (new protocol)
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    let _ = tx.send(Action::GatewayMessage(text));
                 }
                 Ok(Message::Close(_)) => {
                     let _ = tx.send(Action::GatewayDisconnected(
@@ -1979,10 +1983,24 @@ impl App {
         }
     }
 
-    /// Send a text message to the gateway over the open WebSocket connection.
+    /// Send a message to the gateway over the open WebSocket connection.
+    /// Uses binary frames for efficiency.
     async fn send_to_gateway(&mut self, text: String) {
         if let Some(ref mut sink) = self.ws_sink {
-            match sink.send(Message::Text(text.into())).await {
+            // Serialize the message as JSON, then send as binary
+            let json_value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+                serde_json::json!({ "type": "chat", "messages": [], "content": text })
+            });
+            let bytes = match serde_json::to_vec(&json_value) {
+                Ok(b) => b,
+                Err(err) => {
+                    self.chat_loading_tick = None;
+                    self.state.loading_line = None;
+                    self.state.messages.push(DisplayMessage::error(format!("Serialization failed: {}", err)));
+                    return;
+                }
+            };
+            match sink.send(Message::Binary(bytes.into())).await {
                 Ok(()) => {}
                 Err(err) => {
                     self.chat_loading_tick = None;
@@ -2349,18 +2367,18 @@ impl App {
             // Use blocking reqwest for simplicity in sync context
             let response = reqwest::blocking::get(url)
                 .map_err(|e| format!("Failed to download: {}", e))?;
-            
+
             let bytes = response.bytes()
                 .map_err(|e| format!("Failed to read response: {}", e))?;
-            
+
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create directory: {}", e))?;
             }
-            
+
             std::fs::write(&dest, &bytes)
                 .map_err(|e| format!("Failed to write file: {}", e))?;
-            
+
             return Ok(dest.to_string_lossy().to_string());
         }
 

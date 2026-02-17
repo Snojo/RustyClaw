@@ -18,7 +18,8 @@ mod types;
 
 // Re-export protocol types
 pub use protocol::{
-    ClientFrameType, ServerFrameType, StatusType, frame,
+    ClientFrameType, ServerFrameType, StatusType, ServerFrame, ClientFrame,
+    serialize_frame, deserialize_frame, ServerPayload,
 };
 
 // Re-export public types
@@ -71,6 +72,18 @@ pub type SharedConfig = Arc<RwLock<Config>>;
 
 /// Shared model context, updated on reload.
 pub type SharedModelCtx = Arc<RwLock<Option<Arc<ModelContext>>>>;
+
+/// Send a ServerFrame as a binary WebSocket message.
+async fn send_binary_frame(writer: &mut WsWriter, frame: &ServerFrame) -> Result<()> {
+    let bytes = serialize_frame(frame).map_err(|e| anyhow::anyhow!("序列化失败: {}", e))?;
+    writer.send(Message::Binary(bytes.into())).await
+        .map_err(|e| anyhow::anyhow!("发送失败: {}", e))
+}
+
+/// Parse a ClientFrame from binary WebSocket message bytes.
+fn parse_binary_client_frame(bytes: &[u8]) -> Result<ClientFrame> {
+    deserialize_frame(bytes).map_err(|e| anyhow::anyhow!("解析失败: {}", e))
+}
 
 // Re-export validate_model_connection for external use
 pub use providers::validate_model_connection;
@@ -641,9 +654,22 @@ async fn handle_connection(
                                     continue;
                                 }
                             }
-                            // Forward other messages
+                            // Forward text messages
                             if msg_tx.send(Message::Text(text.clone())).await.is_err() {
                                 break; // Channel closed
+                            }
+                        }
+                        Some(Ok(Message::Binary(ref data))) => {
+                            // Check for cancel message in binary
+                            if let Ok(frame) = parse_binary_client_frame(data) {
+                                if frame.frame_type == ClientFrameType::Cancel {
+                                    reader_tool_cancel.store(true, Ordering::Relaxed);
+                                    continue;
+                                }
+                            }
+                            // Forward binary messages
+                            if msg_tx.send(Message::Binary(data.clone().into())).await.is_err() {
+                                break;
                             }
                         }
                         Some(Ok(msg)) => {

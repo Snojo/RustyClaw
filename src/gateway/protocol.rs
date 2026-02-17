@@ -1,370 +1,371 @@
 //! Protocol types for gateway WebSocket communication.
 //!
-//! This module provides typed frame definitions to replace magic string
-//! literals like `"type": "secrets_list_result"` with type-safe enums.
+//! This module provides typed frame definitions for binary serialization
+//! using bincode. The client and server are compiled together, so they
+//! share the exact same types.
+//!
+//! ## Binary Protocol
+//!
+//! Frames are serialized using bincode and sent as WebSocket Binary messages.
+//! Each frame has a type enum as the first field to allow dispatch.
+//!
+//! ## Backwards Compatibility
+//!
+//! The protocol supports receiving JSON text frames for backwards compatibility
+//! with older versions. The receiver detects the format and handles accordingly.
 
 use serde::{Deserialize, Serialize};
 
 /// Incoming frame types from client to gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum ClientFrameType {
     /// Authentication response with TOTP code.
-    AuthResponse,
+    AuthResponse = 0,
     /// Unlock the vault with password.
-    UnlockVault,
+    UnlockVault = 1,
     /// List all secrets.
-    SecretsList,
+    SecretsList = 2,
     /// Get a specific secret.
-    SecretsGet,
+    SecretsGet = 3,
     /// Store a secret.
-    SecretsStore,
+    SecretsStore = 4,
     /// Delete a secret.
-    SecretsDelete,
+    SecretsDelete = 5,
     /// Peek at a credential (display without exposing value).
-    SecretsPeek,
+    SecretsPeek = 6,
     /// Set access policy for a credential.
-    SecretsSetPolicy,
+    SecretsSetPolicy = 7,
     /// Enable/disable a credential.
-    SecretsSetDisabled,
+    SecretsSetDisabled = 8,
     /// Delete a credential entirely.
-    SecretsDeleteCredential,
+    SecretsDeleteCredential = 9,
     /// Check if TOTP is configured.
-    SecretsHasTotp,
+    SecretsHasTotp = 10,
     /// Set up TOTP for the vault.
-    SecretsSetupTotp,
+    SecretsSetupTotp = 11,
     /// Verify a TOTP code.
-    SecretsVerifyTotp,
+    SecretsVerifyTotp = 12,
     /// Remove TOTP from the vault.
-    SecretsRemoveTotp,
+    SecretsRemoveTotp = 13,
     /// Reload configuration.
-    Reload,
+    Reload = 14,
     /// Cancel the current tool loop.
-    Cancel,
+    Cancel = 15,
     /// Chat message (default).
-    Chat,
-}
-
-impl ClientFrameType {
-    /// Parse from a string, returning None for unknown types.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "auth_response" => Some(Self::AuthResponse),
-            "unlock_vault" => Some(Self::UnlockVault),
-            "secrets_list" => Some(Self::SecretsList),
-            "secrets_get" => Some(Self::SecretsGet),
-            "secrets_store" => Some(Self::SecretsStore),
-            "secrets_delete" => Some(Self::SecretsDelete),
-            "secrets_peek" => Some(Self::SecretsPeek),
-            "secrets_set_policy" => Some(Self::SecretsSetPolicy),
-            "secrets_set_disabled" => Some(Self::SecretsSetDisabled),
-            "secrets_delete_credential" => Some(Self::SecretsDeleteCredential),
-            "secrets_has_totp" => Some(Self::SecretsHasTotp),
-            "secrets_setup_totp" => Some(Self::SecretsSetupTotp),
-            "secrets_verify_totp" => Some(Self::SecretsVerifyTotp),
-            "secrets_remove_totp" => Some(Self::SecretsRemoveTotp),
-            "reload" => Some(Self::Reload),
-            "cancel" => Some(Self::Cancel),
-            "chat" => Some(Self::Chat),
-            _ => None,
-        }
-    }
-
-    /// Convert to the string representation used in the protocol.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AuthResponse => "auth_response",
-            Self::UnlockVault => "unlock_vault",
-            Self::SecretsList => "secrets_list",
-            Self::SecretsGet => "secrets_get",
-            Self::SecretsStore => "secrets_store",
-            Self::SecretsDelete => "secrets_delete",
-            Self::SecretsPeek => "secrets_peek",
-            Self::SecretsSetPolicy => "secrets_set_policy",
-            Self::SecretsSetDisabled => "secrets_set_disabled",
-            Self::SecretsDeleteCredential => "secrets_delete_credential",
-            Self::SecretsHasTotp => "secrets_has_totp",
-            Self::SecretsSetupTotp => "secrets_setup_totp",
-            Self::SecretsVerifyTotp => "secrets_verify_totp",
-            Self::SecretsRemoveTotp => "secrets_remove_totp",
-            Self::Reload => "reload",
-            Self::Cancel => "cancel",
-            Self::Chat => "chat",
-        }
-    }
+    Chat = 16,
 }
 
 /// Outgoing frame types from gateway to client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum ServerFrameType {
     /// Authentication challenge request.
-    AuthChallenge,
+    AuthChallenge = 0,
     /// Authentication result.
-    AuthResult,
+    AuthResult = 1,
     /// Too many auth attempts, locked out.
-    AuthLocked,
+    AuthLocked = 2,
     /// Hello message on connect.
-    Hello,
+    Hello = 3,
     /// Status update frame.
-    Status,
+    Status = 4,
     /// Vault unlocked result.
-    VaultUnlocked,
+    VaultUnlocked = 5,
     /// Secrets list result.
-    SecretsListResult,
+    SecretsListResult = 6,
     /// Secrets store result.
-    SecretsStoreResult,
+    SecretsStoreResult = 7,
     /// Secrets get result.
-    SecretsGetResult,
+    SecretsGetResult = 8,
     /// Secrets delete result.
-    SecretsDeleteResult,
+    SecretsDeleteResult = 9,
     /// Secrets peek result.
-    SecretsPeekResult,
+    SecretsPeekResult = 10,
     /// Secrets set policy result.
-    SecretsSetPolicyResult,
+    SecretsSetPolicyResult = 11,
     /// Secrets set disabled result.
-    SecretsSetDisabledResult,
+    SecretsSetDisabledResult = 12,
     /// Secrets delete credential result.
-    SecretsDeleteCredentialResult,
+    SecretsDeleteCredentialResult = 13,
     /// Secrets has TOTP result.
-    SecretsHasTotpResult,
+    SecretsHasTotpResult = 14,
     /// Secrets setup TOTP result.
-    SecretsSetupTotpResult,
+    SecretsSetupTotpResult = 15,
     /// Secrets verify TOTP result.
-    SecretsVerifyTotpResult,
+    SecretsVerifyTotpResult = 16,
     /// Secrets remove TOTP result.
-    SecretsRemoveTotpResult,
+    SecretsRemoveTotpResult = 17,
     /// Reload result.
-    ReloadResult,
+    ReloadResult = 18,
     /// Error frame.
-    Error,
+    Error = 19,
     /// Info frame.
-    Info,
+    Info = 20,
     /// Stream start.
-    StreamStart,
+    StreamStart = 21,
     /// Chunk of response text.
-    Chunk,
+    Chunk = 22,
     /// Thinking start (for extended thinking).
-    ThinkingStart,
+    ThinkingStart = 23,
     /// Thinking delta (streaming thinking content).
-    ThinkingDelta,
+    ThinkingDelta = 24,
     /// Thinking end.
-    ThinkingEnd,
+    ThinkingEnd = 25,
     /// Tool call from model.
-    ToolCall,
+    ToolCall = 26,
     /// Tool result from execution.
-    ToolResult,
+    ToolResult = 27,
     /// Response complete.
-    ResponseDone,
-}
-
-impl ServerFrameType {
-    /// Convert to the string representation used in the protocol.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AuthChallenge => "auth_challenge",
-            Self::AuthResult => "auth_result",
-            Self::AuthLocked => "auth_locked",
-            Self::Hello => "hello",
-            Self::Status => "status",
-            Self::VaultUnlocked => "vault_unlocked",
-            Self::SecretsListResult => "secrets_list_result",
-            Self::SecretsStoreResult => "secrets_store_result",
-            Self::SecretsGetResult => "secrets_get_result",
-            Self::SecretsDeleteResult => "secrets_delete_result",
-            Self::SecretsPeekResult => "secrets_peek_result",
-            Self::SecretsSetPolicyResult => "secrets_set_policy_result",
-            Self::SecretsSetDisabledResult => "secrets_set_disabled_result",
-            Self::SecretsDeleteCredentialResult => "secrets_delete_credential_result",
-            Self::SecretsHasTotpResult => "secrets_has_totp_result",
-            Self::SecretsSetupTotpResult => "secrets_setup_totp_result",
-            Self::SecretsVerifyTotpResult => "secrets_verify_totp_result",
-            Self::SecretsRemoveTotpResult => "secrets_remove_totp_result",
-            Self::ReloadResult => "reload_result",
-            Self::Error => "error",
-            Self::Info => "info",
-            Self::StreamStart => "stream_start",
-            Self::Chunk => "chunk",
-            Self::ThinkingStart => "thinking_start",
-            Self::ThinkingDelta => "thinking_delta",
-            Self::ThinkingEnd => "thinking_end",
-            Self::ToolCall => "tool_call",
-            Self::ToolResult => "tool_result",
-            Self::ResponseDone => "response_done",
-        }
-    }
+    ResponseDone = 28,
 }
 
 /// Status frame sub-types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum StatusType {
     /// Model is configured.
-    ModelConfigured,
+    ModelConfigured = 0,
     /// Credentials loaded.
-    CredentialsLoaded,
+    CredentialsLoaded = 1,
     /// Credentials missing.
-    CredentialsMissing,
+    CredentialsMissing = 2,
     /// Model connecting.
-    ModelConnecting,
+    ModelConnecting = 3,
     /// Model ready.
-    ModelReady,
+    ModelReady = 4,
     /// Model error.
-    ModelError,
+    ModelError = 5,
     /// No model configured.
-    NoModel,
+    NoModel = 6,
     /// Vault is locked.
-    VaultLocked,
+    VaultLocked = 7,
 }
 
-impl StatusType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ModelConfigured => "model_configured",
-            Self::CredentialsLoaded => "credentials_loaded",
-            Self::CredentialsMissing => "credentials_missing",
-            Self::ModelConnecting => "model_connecting",
-            Self::ModelReady => "model_ready",
-            Self::ModelError => "model_error",
-            Self::NoModel => "no_model",
-            Self::VaultLocked => "vault_locked",
-        }
-    }
+// ============================================================================
+// Binary Frame Types - these are the actual wire format
+// ============================================================================
+
+/// Generic client frame envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientFrame {
+    pub frame_type: ClientFrameType,
+    pub payload: ClientPayload,
 }
 
-/// Helper to build typed frames.
-pub mod frame {
-    use super::*;
-    use serde_json::{json, Value};
+/// Payload variants for client frames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ClientPayload {
+    Empty,
+    AuthResponse {
+        code: String,
+    },
+    UnlockVault {
+        password: String,
+    },
+    SecretsGet {
+        key: String,
+    },
+    SecretsStore {
+        key: String,
+        value: String,
+    },
+    SecretsDelete {
+        key: String,
+    },
+    SecretsPeek {
+        name: String,
+    },
+    SecretsSetPolicy {
+        name: String,
+        policy: String,
+        skills: Vec<String>,
+    },
+    SecretsSetDisabled {
+        name: String,
+        disabled: bool,
+    },
+    SecretsDeleteCredential {
+        name: String,
+    },
+    SecretsVerifyTotp {
+        code: String,
+    },
+}
 
-    /// Create a simple frame with just a type field.
-    pub fn simple(frame_type: ServerFrameType) -> Value {
-        json!({ "type": frame_type.as_str() })
-    }
+/// Generic server frame envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerFrame {
+    pub frame_type: ServerFrameType,
+    pub payload: ServerPayload,
+}
 
-    /// Create a frame with type and additional fields.
-    pub fn with_fields<T: Serialize>(frame_type: ServerFrameType, fields: T) -> Value {
-        let mut value = serde_json::to_value(fields).unwrap_or_default();
-        if let Some(map) = value.as_object_mut() {
-            map.insert("type".to_string(), json!(frame_type.as_str()));
-            json!(map)
-        } else {
-            json!({ "type": frame_type.as_str(), "data": value })
-        }
-    }
+/// Payload variants for server frames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ServerPayload {
+    Empty,
+    Hello {
+        agent: String,
+        settings_dir: String,
+        vault_locked: bool,
+        provider: Option<String>,
+        model: Option<String>,
+    },
+    AuthChallenge {
+        method: String,
+    },
+    AuthResult {
+        ok: bool,
+        message: Option<String>,
+        retry: Option<bool>,
+    },
+    AuthLocked {
+        message: String,
+        retry_after: Option<u64>,
+    },
+    Status {
+        status: StatusType,
+        detail: String,
+    },
+    VaultUnlocked {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsListResult {
+        ok: bool,
+        entries: Vec<SecretEntryDto>,
+    },
+    SecretsStoreResult {
+        ok: bool,
+        message: String,
+    },
+    SecretsGetResult {
+        ok: bool,
+        key: String,
+        value: Option<String>,
+        message: Option<String>,
+    },
+    SecretsDeleteResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsPeekResult {
+        ok: bool,
+        fields: Vec<(String, String)>,
+        message: Option<String>,
+    },
+    SecretsSetPolicyResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsSetDisabledResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsDeleteCredentialResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsHasTotpResult {
+        has_totp: bool,
+    },
+    SecretsSetupTotpResult {
+        ok: bool,
+        uri: Option<String>,
+        message: Option<String>,
+    },
+    SecretsVerifyTotpResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    SecretsRemoveTotpResult {
+        ok: bool,
+        message: Option<String>,
+    },
+    ReloadResult {
+        ok: bool,
+        provider: String,
+        model: String,
+        message: Option<String>,
+    },
+    Error {
+        ok: bool,
+        message: String,
+    },
+    Info {
+        message: String,
+    },
+    StreamStart,
+    Chunk {
+        delta: String,
+    },
+    ThinkingStart,
+    ThinkingDelta {
+        delta: String,
+    },
+    ThinkingEnd,
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        result: String,
+        is_error: bool,
+    },
+    ResponseDone {
+        ok: bool,
+    },
+}
 
-    /// Create an error frame.
-    pub fn error(message: &str) -> Value {
-        json!({
-            "type": ServerFrameType::Error.as_str(),
-            "ok": false,
-            "message": message
-        })
-    }
+/// DTO for secret entries in list results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretEntryDto {
+    pub name: String,
+    pub label: String,
+    pub kind: String,
+    pub policy: String,
+    pub disabled: bool,
+}
 
-    /// Create an info frame.
-    pub fn info(message: &str) -> Value {
-        json!({
-            "type": ServerFrameType::Info.as_str(),
-            "message": message
-        })
-    }
+// ============================================================================
+// Binary Serialization Helpers
+// ============================================================================
 
-    /// Create a status frame.
-    pub fn status(status: StatusType, detail: &str) -> Value {
-        json!({
-            "type": ServerFrameType::Status.as_str(),
-            "status": status.as_str(),
-            "detail": detail
-        })
-    }
+/// Serialize a frame to binary using bincode with serde.
+pub fn serialize_frame<T: serde::Serialize>(frame: &T) -> Result<Vec<u8>, String> {
+    bincode::serde::encode_to_vec(frame, bincode::config::standard()).map_err(|e| e.to_string())
+}
 
-    /// Create an auth challenge frame.
-    pub fn auth_challenge() -> Value {
-        json!({
-            "type": ServerFrameType::AuthChallenge.as_str(),
-            "method": "totp"
-        })
-    }
+/// Deserialize a frame from binary using bincode with serde.
+pub fn deserialize_frame<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    let (result, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map_err(|e| e.to_string())?;
+    Ok(result)
+}
 
-    /// Create an auth result frame.
-    pub fn auth_result(ok: bool, message: Option<&str>, retry: Option<bool>) -> Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "type".to_string(),
-            json!(ServerFrameType::AuthResult.as_str()),
-        );
-        map.insert("ok".to_string(), json!(ok));
-        if let Some(msg) = message {
-            map.insert("message".to_string(), json!(msg));
-        }
-        if let Some(r) = retry {
-            map.insert("retry".to_string(), json!(r));
-        }
-        json!(map)
-    }
+/// Helper to send a ServerFrame as a binary WebSocket message.
+#[macro_export]
+macro_rules! send_binary_frame {
+    ($writer:expr, $frame:expr) => {{
+        let bytes = $crate::gateway::serialize_frame(&$frame)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize frame: {}", e))?;
+        $writer
+            .send(tokio_tungstenite::tungstenite::Message::Binary(bytes))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send frame: {}", e))
+    }};
+}
 
-    /// Create an auth locked frame.
-    pub fn auth_locked(message: &str, retry_after: Option<u64>) -> Value {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "type".to_string(),
-            json!(ServerFrameType::AuthLocked.as_str()),
-        );
-        map.insert("message".to_string(), json!(message));
-        if let Some(secs) = retry_after {
-            map.insert("retry_after".to_string(), json!(secs));
-        }
-        json!(map)
-    }
-
-    /// Create a hello frame.
-    pub fn hello(agent: &str, settings_dir: &std::path::Path, vault_locked: bool) -> Value {
-        let mut map = serde_json::Map::new();
-        map.insert("type".to_string(), json!(ServerFrameType::Hello.as_str()));
-        map.insert("agent".to_string(), json!(agent));
-        map.insert(
-            "settings_dir".to_string(),
-            json!(settings_dir.display().to_string()),
-        );
-        map.insert("vault_locked".to_string(), json!(vault_locked));
-        json!(map)
-    }
-
-    /// Create a tool call frame.
-    pub fn tool_call(id: &str, name: &str, arguments: &serde_json::Value) -> Value {
-        json!({
-            "type": ServerFrameType::ToolCall.as_str(),
-            "id": id,
-            "name": name,
-            "arguments": arguments
-        })
-    }
-
-    /// Create a tool result frame.
-    pub fn tool_result(id: &str, name: &str, result: &str, is_error: bool) -> Value {
-        json!({
-            "type": ServerFrameType::ToolResult.as_str(),
-            "id": id,
-            "name": name,
-            "result": result,
-            "is_error": is_error
-        })
-    }
-
-    /// Create a chunk frame for streaming.
-    pub fn chunk(delta: &str) -> Value {
-        json!({
-            "type": ServerFrameType::Chunk.as_str(),
-            "delta": delta
-        })
-    }
-
-    /// Create a response done frame.
-    pub fn response_done(ok: bool) -> Value {
-        json!({
-            "type": ServerFrameType::ResponseDone.as_str(),
-            "ok": ok
-        })
-    }
+/// Helper to parse a client frame from binary WebSocket message bytes.
+#[macro_export]
+macro_rules! parse_binary_client_frame {
+    ($bytes:expr) => {{
+        $crate::gateway::deserialize_frame::<$crate::gateway::ClientFrame>($bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse client frame: {}", e))
+    }};
 }
