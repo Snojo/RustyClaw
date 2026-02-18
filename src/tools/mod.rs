@@ -129,6 +129,16 @@ impl ToolPermission {
             Self::SkillOnly(_) => "SKILL",
         }
     }
+
+    /// Human-readable description of what this permission level does.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Allow => "Tool runs automatically — no confirmation needed.",
+            Self::Deny => "Tool is blocked — the model receives an error and cannot use it.",
+            Self::Ask => "You will be prompted to approve or deny each use of this tool.",
+            Self::SkillOnly(_) => "Tool can only be used by named skills, not in direct chat.",
+        }
+    }
 }
 
 /// Return all tool names as a sorted list.
@@ -136,6 +146,49 @@ pub fn all_tool_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = all_tools().iter().map(|t| t.name).collect();
     names.sort();
     names
+}
+
+/// Short, user-facing summary of what each tool lets the agent do.
+pub fn tool_summary(name: &str) -> &'static str {
+    match name {
+        "read_file" => "Read files on your computer",
+        "write_file" => "Create or overwrite files",
+        "edit_file" => "Edit existing files",
+        "list_directory" => "List folder contents",
+        "search_files" => "Search inside file contents",
+        "find_files" => "Find files by name",
+        "execute_command" => "Run shell commands",
+        "web_fetch" => "Fetch content from URLs",
+        "web_search" => "Search the web",
+        "process" => "Manage background processes",
+        "memory_search" => "Search agent memory files",
+        "memory_get" => "Read agent memory files",
+        "cron" => "Manage scheduled jobs",
+        "sessions_list" => "List active sessions",
+        "sessions_spawn" => "Spawn sub-agent sessions",
+        "sessions_send" => "Send messages to sessions",
+        "sessions_history" => "Read session message history",
+        "session_status" => "Check session status & usage",
+        "agents_list" => "List available agent types",
+        "apply_patch" => "Apply diff patches to files",
+        "secrets_list" => "List vault secret names",
+        "secrets_get" => "Read secrets from the vault",
+        "secrets_store" => "Store secrets in the vault",
+        "gateway" => "Control the gateway daemon",
+        "message" => "Send messages via channels",
+        "tts" => "Convert text to speech",
+        "image" => "Analyze images with vision AI",
+        "nodes" => "Control paired companion devices",
+        "browser" => "Automate a web browser",
+        "canvas" => "Display UI on node canvases",
+        "skill_list" => "List loaded skills",
+        "skill_search" => "Search the skill registry",
+        "skill_install" => "Install skills from registry",
+        "skill_info" => "View skill details",
+        "skill_enable" => "Enable or disable skills",
+        "skill_link_secret" => "Link vault secrets to skills",
+        _ => "Unknown tool",
+    }
 }
 
 // ── Tool definitions ────────────────────────────────────────────────────────

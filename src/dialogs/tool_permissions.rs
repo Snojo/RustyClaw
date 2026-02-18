@@ -254,14 +254,13 @@ pub fn draw_tool_permissions(
     area: Rect,
     state: &mut ToolPermissionsState,
 ) {
-    // Width: fit marker(2) + name(26) + badge(12) + skill info(~20) + padding
-    let dialog_w = 80u16.min(area.width.saturating_sub(2));
+    // Width: fit marker(2) + name(22) + badge(12) + description(~40) + padding
+    let dialog_w = 110u16.min(area.width.saturating_sub(2));
     let dialog_h = match state.phase {
         ToolPermissionsPhase::Selecting => {
-            // Use nearly all available height so all tools are visible
-            // (36 tools + 1 header + 2 border = 39 rows ideal)
-            let ideal = state.tool_names.len() as u16 + 4; // +4 for borders + header + padding
-            ideal.min(area.height.saturating_sub(2)).max(12)
+            // +4 for borders + header, +3 for separator + description area
+            let ideal = state.tool_names.len() as u16 + 7;
+            ideal.min(area.height.saturating_sub(2)).max(14)
         }
         ToolPermissionsPhase::EditingSkills { .. } => 12u16.min(area.height.saturating_sub(2)),
     };
@@ -289,8 +288,18 @@ pub fn draw_tool_permissions(
             let inner = block.inner(dialog_area);
             frame.render_widget(block, dialog_area);
 
+            // Split inner into: tool list (flexible) + separator + description (2 rows)
+            let chunks = Layout::vertical([
+                Constraint::Min(4),    // tool list
+                Constraint::Length(3), // separator + 2 description lines
+            ])
+            .split(inner);
+
+            let list_area = chunks[0];
+            let desc_area = chunks[1];
+
             // Calculate visible range with stable scroll tracking
-            let visible_rows = inner.height.saturating_sub(1) as usize; // -1 for header
+            let visible_rows = list_area.height.saturating_sub(1) as usize; // -1 for header
             let scroll = if visible_rows >= state.tool_names.len() {
                 // Everything fits — no scrolling needed
                 0
@@ -308,13 +317,19 @@ pub fn draw_tool_permissions(
             // Header row
             let header = ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("  {:<24} ", "TOOL"),
+                    format!("  {:<22} ", "TOOL"),
                     Style::default()
                         .fg(tp::ACCENT_BRIGHT)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "PERMISSION",
+                    format!("{:<12}", "PERMISSION"),
+                    Style::default()
+                        .fg(tp::ACCENT_BRIGHT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "DESCRIPTION",
                     Style::default()
                         .fg(tp::ACCENT_BRIGHT)
                         .add_modifier(Modifier::BOLD),
@@ -355,7 +370,16 @@ pub fn draw_tool_permissions(
                 };
 
                 // Truncate tool name if needed, pad to align
-                let display_name = format!("{:<24}", name);
+                let display_name = format!("{:<22}", name);
+
+                // badge_text is e.g. " Allow ", " Deny ", " Ask ", " Skill "
+                let badge_len = badge_text.len();
+                // Pad after the badge so the description column aligns
+                let pad = if badge_len < 12 {
+                    " ".repeat(12 - badge_len)
+                } else {
+                    " ".to_string()
+                };
 
                 let mut spans = vec![
                     Span::styled(marker, Style::default().fg(tp::ACCENT)),
@@ -366,23 +390,57 @@ pub fn draw_tool_permissions(
                             .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
                             .bg(badge_color),
                     ),
+                    Span::raw(pad),
                 ];
 
-                // Show skill names for SkillOnly
+                // Show skill names for SkillOnly inline after badge
                 if let ToolPermission::SkillOnly(ref skills) = perm {
                     if !skills.is_empty() {
                         spans.push(Span::styled(
-                            format!(" ({})", skills.join(", ")),
+                            format!("({})", skills.join(", ")),
                             Style::default().fg(tp::TEXT_DIM),
                         ));
                     }
                 }
 
+                // Tool description column
+                spans.push(Span::styled(
+                    tools::tool_summary(name),
+                    Style::default().fg(tp::TEXT_DIM),
+                ));
+
                 items.push(ListItem::new(Line::from(spans)));
             }
 
             let list = List::new(items);
-            frame.render_widget(list, inner);
+            frame.render_widget(list, list_area);
+
+            // ── Permission description for the selected tool ────────
+            let current_perm = state.current_permission();
+            let desc_lines = vec![
+                Line::from(Span::styled(
+                    "─".repeat(desc_area.width as usize),
+                    Style::default().fg(tp::SURFACE_7),
+                )),
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", current_perm.badge()),
+                        Style::default()
+                            .fg(Color::Rgb(0x1E, 0x1C, 0x1A))
+                            .bg(match current_perm {
+                                ToolPermission::Allow => tp::SUCCESS,
+                                ToolPermission::Ask => tp::WARN,
+                                ToolPermission::Deny => tp::ERROR,
+                                ToolPermission::SkillOnly(_) => tp::INFO,
+                            }),
+                    ),
+                    Span::styled(
+                        format!(" {}", current_perm.description()),
+                        Style::default().fg(tp::TEXT_DIM),
+                    ),
+                ]),
+            ];
+            frame.render_widget(Paragraph::new(desc_lines), desc_area);
 
             // Scroll indicator when list is longer than viewport
             let total = state.tool_names.len();
