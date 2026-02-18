@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use strum::Display;
 
 /// Actions that drive the application, inspired by openapi-tui.
@@ -191,5 +192,20 @@ pub enum Action {
     Success(String),
     /// Warning message
     Warning(String),
+    /// Show the tool permissions editor dialog
+    ShowToolPermissions,
+    /// Save updated tool permissions to config
+    SaveToolPermissions(HashMap<String, crate::tools::ToolPermission>),
+    /// Gateway is requesting user approval to run a tool (Ask mode)
+    ToolApprovalRequest {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    /// User responded to a tool approval request
+    ToolApprovalResponse {
+        id: String,
+        approved: bool,
+    },
     Noop,
 }

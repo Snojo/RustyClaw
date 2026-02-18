@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +87,9 @@ pub struct Config {
     /// Messenger polling interval in milliseconds (default: 2000).
     #[serde(default)]
     pub messenger_poll_interval_ms: Option<u32>,
+    /// Per-tool permission overrides. Tools not listed here default to Allow.
+    #[serde(default)]
+    pub tool_permissions: HashMap<String, crate::tools::ToolPermission>,
 }
 
 /// Configuration for a messenger backend.
@@ -160,6 +164,7 @@ impl Default for Config {
             clawhub_token: None,
             system_prompt: None,
             messenger_poll_interval_ms: None,
+            tool_permissions: HashMap::new(),
         }
     }
 }

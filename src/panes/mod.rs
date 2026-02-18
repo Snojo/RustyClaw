@@ -77,6 +77,8 @@ pub enum MessageRole {
     ToolCall,
     /// Result of a tool invocation (📎)
     ToolResult,
+    /// Collapsed thinking summary from an intermediate tool-loop round (💭)
+    Thinking,
 }
 
 impl MessageRole {
@@ -92,6 +94,7 @@ impl MessageRole {
             Self::System => "📡",
             Self::ToolCall => "🔧",
             Self::ToolResult => "📎",
+            Self::Thinking => "💭",
         }
     }
 }
@@ -416,6 +419,9 @@ impl DisplayMessage {
     pub fn tool_result(content: impl Into<String>) -> Self {
         Self::new(MessageRole::ToolResult, content)
     }
+    pub fn thinking(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Thinking, content)
+    }
 
     /// Update the content and invalidate the cache.
     /// Used during streaming when content is appended.
@@ -460,6 +466,7 @@ impl DisplayMessage {
             MessageRole::System => tp::MUTED,
             MessageRole::ToolCall => tp::MUTED,
             MessageRole::ToolResult => tp::TEXT_DIM,
+            MessageRole::Thinking => tp::MUTED,
         };
 
         let is_assistant = matches!(role, MessageRole::Assistant);
@@ -478,10 +485,12 @@ impl DisplayMessage {
                 MessageRole::System => "📡",
                 MessageRole::ToolCall => "🔧",
                 MessageRole::ToolResult => "📎",
+                MessageRole::Thinking => "💭",
             };
             if matches!(role, MessageRole::User | MessageRole::Assistant | MessageRole::Info | 
                        MessageRole::Success | MessageRole::Warning | MessageRole::Error | 
-                       MessageRole::System | MessageRole::ToolCall | MessageRole::ToolResult) {
+                       MessageRole::System | MessageRole::ToolCall | MessageRole::ToolResult |
+                       MessageRole::Thinking) {
                 let icon = icon_fn();
                 spans.push(Span::styled(
                     format!("{icon} "),

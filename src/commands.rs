@@ -26,6 +26,8 @@ pub enum CommandAction {
     ShowSecrets,
     /// Show the provider selector dialog
     ShowProviderSelector,
+    /// Show the tool permissions dialog
+    ShowToolPermissions,
     /// Reload gateway configuration
     GatewayReload,
     /// Download media by ID (id, optional destination path)
@@ -64,6 +66,7 @@ pub fn command_names() -> Vec<String> {
         "model".into(),
         "skills".into(),
         "skill".into(),
+        "tools".into(),
         "skill info".into(),
         "skill remove".into(),
         "skill search".into(),
@@ -121,6 +124,7 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
                 "  /model <name>            - Change the AI model".to_string(),
                 "  /skills                  - Show loaded skills".to_string(),
                 "  /skill                   - Skill management (info/install/publish/link)".to_string(),
+                "  /tools                   - Edit tool permissions (allow/deny/ask/skill)".to_string(),
                 "  /secrets                 - Open the secrets vault".to_string(),
             ],
             action: CommandAction::None,
@@ -218,6 +222,10 @@ pub fn handle_command(input: &str, context: &mut CommandContext<'_>) -> CommandR
         "skills" => CommandResponse {
             messages: Vec::new(),
             action: CommandAction::ShowSkills,
+        },
+        "tools" => CommandResponse {
+            messages: Vec::new(),
+            action: CommandAction::ShowToolPermissions,
         },
         "skill" => handle_skill_subcommand(&parts[1..], context),
         "secrets" => CommandResponse {

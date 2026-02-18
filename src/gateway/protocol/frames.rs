@@ -42,6 +42,8 @@ pub enum ClientFrameType {
     Cancel = 15,
     /// Chat message (default).
     Chat = 16,
+    /// User response to a tool approval request.
+    ToolApprovalResponse = 17,
 }
 
 /// Outgoing frame types from gateway to client.
@@ -106,6 +108,8 @@ pub enum ServerFrameType {
     ToolResult = 27,
     /// Response complete.
     ResponseDone = 28,
+    /// Tool approval request — ask user to approve a tool call.
+    ToolApprovalRequest = 29,
 }
 
 /// Status frame sub-types.
@@ -190,6 +194,10 @@ pub enum ClientPayload {
         code: String,
     },
     SecretsRemoveTotp,
+    ToolApprovalResponse {
+        id: String,
+        approved: bool,
+    },
 }
 
 /// Generic server frame envelope.
@@ -316,6 +324,11 @@ pub enum ServerPayload {
     },
     ResponseDone {
         ok: bool,
+    },
+    ToolApprovalRequest {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
     },
 }
 

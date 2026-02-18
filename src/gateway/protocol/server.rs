@@ -481,3 +481,24 @@ where
     };
     send_frame(writer, &frame).await
 }
+
+/// Build and send a tool approval request frame.
+pub async fn send_tool_approval_request<S>(
+    writer: &mut S,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Result<()>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    let frame = ServerFrame {
+        frame_type: ServerFrameType::ToolApprovalRequest,
+        payload: ServerPayload::ToolApprovalRequest {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        },
+    };
+    send_frame(writer, &frame).await
+}

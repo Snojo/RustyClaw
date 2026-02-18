@@ -506,6 +506,11 @@ pub mod tui_palette {
         pub const fn system() -> Style {
             Style::new().fg(SYSTEM_BORDER)
         }
+
+        /// Thinking message border (dim, subtle)
+        pub const fn thinking() -> Style {
+            Style::new().fg(TOOL_BORDER)
+        }
     }
 
     // ── Tool Status Styles ─────────────────────────────────────────

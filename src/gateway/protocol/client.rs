@@ -223,6 +223,15 @@ pub fn server_frame_to_action(frame: &ServerFrame) -> FrameAction {
             FrameAction::just_action(Action::Error(message.clone()))
         }
         ServerPayload::Info { message } => FrameAction::just_action(Action::Info(message.clone())),
+        ServerPayload::ToolApprovalRequest {
+            id,
+            name,
+            arguments,
+        } => FrameAction::just_action(Action::ToolApprovalRequest {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
         ServerPayload::Empty => FrameAction::none(),
     }
 }

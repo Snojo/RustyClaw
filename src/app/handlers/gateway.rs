@@ -599,7 +599,53 @@ impl App {
         Ok(None)
     }
 
+}
 
+/// Collapse a potentially long block of model "thinking" text into a
+/// compact one-line summary for display in the message pane.
+///
+/// Extracts the first meaningful sentence (up to ~120 chars) and formats
+/// it with an italic style hint so the TUI renders it as a muted summary.
+fn collapse_thinking_text(text: &str) -> String {
+    // Skip common preamble patterns
+    let text = text.trim();
+    if text.is_empty() {
+        return "Reasoning…".to_string();
+    }
+
+    // Try to find the first sentence
+    let first_line = text.lines().next().unwrap_or(text);
+    let first_line = first_line.trim();
+
+    // Find a sentence boundary within a reasonable length
+    let max_len = 120;
+    let preview = if first_line.len() <= max_len {
+        first_line.to_string()
+    } else {
+        // Look for a natural break point (sentence end, comma, etc.)
+        let chunk = &first_line[..max_len];
+        if let Some(pos) = chunk.rfind(". ") {
+            format!("{}.", &chunk[..pos])
+        } else if let Some(pos) = chunk.rfind(", ") {
+            format!("{}…", &chunk[..pos])
+        } else if let Some(pos) = chunk.rfind(' ') {
+            format!("{}…", &chunk[..pos])
+        } else {
+            format!("{}…", chunk)
+        }
+    };
+
+    // Include a character count so the user knows how much was collapsed
+    let char_count = text.len();
+    if char_count > 200 {
+        format!("{preview}  ({char_count} chars)")
+    } else {
+        preview
+    }
+}
+
+
+impl App {
 
     pub async fn handle_action(&mut self, action: Action) -> Result<Option<Action>> {
         match action {
@@ -693,17 +739,48 @@ impl App {
                         self.save_history();
                     }
                 } else {
-                    tracing::warn!("Response done: no streaming_response buffer!");
+                    // This is normal when the model's final round had no text output
+                    // (e.g., the streaming buffer was collapsed into a thinking summary
+                    // before the tool call, and the model finished without further text).
+                    debug!("Response done: no streaming_response buffer (collapsed to thinking or empty)");
                 }
             }
             Action::GatewayToolCall { name, arguments, .. } => {
+                // If there's accumulated streaming text from the current round,
+                // collapse it into a compact "thinking" summary so it doesn't
+                // create an ever-growing wall of repeated text.
+                if let Some(buf) = self.streaming_response.take() {
+                    let trimmed = buf.trim();
+                    if !trimmed.is_empty() {
+                        if let Some(last) = self.state.messages.last_mut() {
+                            if matches!(last.role, crate::panes::MessageRole::Assistant) {
+                                // Build a short summary from the first meaningful sentence
+                                let summary = collapse_thinking_text(trimmed);
+                                last.role = crate::panes::MessageRole::Thinking;
+                                last.update_content(summary);
+                            }
+                        }
+                    }
+                }
                 let args_str = arguments.to_string();
-                self.state.messages.push(DisplayMessage::tool_call(format!("{name}({args_str})")));
+                // Compact display for tool call arguments
+                let display_args = if args_str.len() > 200 {
+                    format!("{}…", &args_str[..200])
+                } else {
+                    args_str
+                };
+                self.state.messages.push(DisplayMessage::tool_call(format!("{name}({display_args})")));
             }
             Action::GatewayToolResult { name, result, is_error, .. } => {
                 let prefix = if is_error { "⚠ " } else { "" };
-                let display_result = if result.len() > 2000 {
-                    format!("{}{}…({} bytes)", prefix, &result[..2000], result.len())
+                // Compact display: show first ~500 chars with truncation indicator
+                let display_result = if result.len() > 500 {
+                    let truncated = &result[..result.char_indices()
+                        .take_while(|(i, _)| *i < 500)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(500)];
+                    format!("{prefix}{truncated}… ({} bytes total)", result.len())
                 } else {
                     format!("{prefix}{result}")
                 };

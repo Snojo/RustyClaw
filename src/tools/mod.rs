@@ -69,6 +69,75 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
+// ── Tool permissions ────────────────────────────────────────────────────────
+
+/// Permission level for a tool, controlling whether the agent can invoke it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPermission {
+    /// Tool is always allowed — no confirmation needed.
+    Allow,
+    /// Tool is always denied — the model receives an error.
+    Deny,
+    /// Tool requires user confirmation each time.
+    Ask,
+    /// Tool is only allowed when invoked by a named skill.
+    SkillOnly(Vec<String>),
+}
+
+impl Default for ToolPermission {
+    fn default() -> Self {
+        Self::Allow
+    }
+}
+
+impl std::fmt::Display for ToolPermission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allow => write!(f, "Allow"),
+            Self::Deny => write!(f, "Deny"),
+            Self::Ask => write!(f, "Ask"),
+            Self::SkillOnly(skills) => {
+                if skills.is_empty() {
+                    write!(f, "Skill Only (none)")
+                } else {
+                    write!(f, "Skill Only ({})", skills.join(", "))
+                }
+            }
+        }
+    }
+}
+
+impl ToolPermission {
+    /// Cycle to the next simple permission level (for UI toggle).
+    /// SkillOnly is accessed via a separate edit flow.
+    pub fn cycle(&self) -> Self {
+        match self {
+            Self::Allow => Self::Ask,
+            Self::Ask => Self::Deny,
+            Self::Deny => Self::SkillOnly(Vec::new()),
+            Self::SkillOnly(_) => Self::Allow,
+        }
+    }
+
+    /// Short badge text for the TUI.
+    pub fn badge(&self) -> &'static str {
+        match self {
+            Self::Allow => "ALLOW",
+            Self::Deny => "DENY",
+            Self::Ask => "ASK",
+            Self::SkillOnly(_) => "SKILL",
+        }
+    }
+}
+
+/// Return all tool names as a sorted list.
+pub fn all_tool_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = all_tools().iter().map(|t| t.name).collect();
+    names.sort();
+    names
+}
+
 // ── Tool definitions ────────────────────────────────────────────────────────
 
 /// JSON-Schema-like parameter definition.

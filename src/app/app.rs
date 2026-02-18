@@ -4,7 +4,9 @@ use crate::config::Config;
 use crate::dialogs::{
     self, ApiKeyDialogState, AuthPromptState, CredDialogOption, CredentialDialogState,
     FetchModelsLoading, ModelSelectorState, PolicyPickerState, ProviderSelectorState,
-    SecretViewerState, TotpDialogPhase, TotpDialogState, VaultUnlockPromptState, SPINNER_FRAMES,
+    SecretViewerState, TotpDialogPhase, TotpDialogState, ToolPermissionsState,
+    ToolApprovalState,
+    VaultUnlockPromptState, SPINNER_FRAMES,
 };
 use crate::gateway::{ChatMessage, ClientFrame, ClientFrameType, ClientPayload};
 use crate::pages::hatching::Hatching;
@@ -57,6 +59,8 @@ pub struct App {
     pub vault_unlock_prompt: Option<VaultUnlockPromptState>,
     pub secret_viewer: Option<SecretViewerState>,
     pub policy_picker: Option<PolicyPickerState>,
+    pub tool_permissions_dialog: Option<ToolPermissionsState>,
+    pub tool_approval_dialog: Option<ToolApprovalState>,
     pub hatching_page: Option<Hatching>,
     pub showing_hatching: bool,
     pub deferred_vault_password: Option<String>,
@@ -184,6 +188,8 @@ impl App {
             vault_unlock_prompt: None,
             secret_viewer: None,
             policy_picker: None,
+            tool_permissions_dialog: None,
+            tool_approval_dialog: None,
             hatching_page,
             showing_hatching,
             deferred_vault_password: None,
@@ -283,6 +289,20 @@ impl App {
                         } else if self.policy_picker.is_some() {
                             if let Event::Key(key) = &event {
                                 let action = self.handle_policy_picker_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        } else if self.tool_permissions_dialog.is_some() {
+                            if let Event::Key(key) = &event {
+                                let action = self.handle_tool_permissions_key(key.code);
+                                Some(action)
+                            } else {
+                                None
+                            }
+                        } else if self.tool_approval_dialog.is_some() {
+                            if let Event::Key(key) = event {
+                                let action = self.handle_tool_approval_key(key);
                                 Some(action)
                             } else {
                                 None
@@ -550,6 +570,45 @@ impl App {
             }
             Action::ShowProviderSelector => {
                 self.provider_selector = Some(dialogs::open_provider_selector());
+                return Ok(None);
+            }
+            Action::ShowToolPermissions => {
+                self.tool_permissions_dialog =
+                    Some(ToolPermissionsState::new(&self.state.config.tool_permissions));
+                return Ok(None);
+            }
+            Action::SaveToolPermissions(permissions) => {
+                // Remove entries that are just the default (Allow) to keep config clean
+                let cleaned: std::collections::HashMap<String, _> = permissions
+                    .iter()
+                    .filter(|(_, v)| **v != crate::tools::ToolPermission::Allow)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                self.state.config.tool_permissions = cleaned;
+                if let Err(e) = self.state.config.save(None) {
+                    self.state
+                        .messages
+                        .push(DisplayMessage::error(format!("Failed to save config: {}", e)));
+                }
+                return Ok(None);
+            }
+            Action::ToolApprovalRequest { id, name, arguments } => {
+                // Open the approval dialog for the user to decide.
+                self.tool_approval_dialog =
+                    Some(ToolApprovalState::new(id.clone(), name.clone(), arguments.clone()));
+                return Ok(None);
+            }
+            Action::ToolApprovalResponse { id, approved } => {
+                // Send the response frame to the gateway.
+                self.tool_approval_dialog = None;
+                let frame = ClientFrame {
+                    frame_type: ClientFrameType::ToolApprovalResponse,
+                    payload: ClientPayload::ToolApprovalResponse {
+                        id: id.clone(),
+                        approved: *approved,
+                    },
+                };
+                self.send_frame(frame).await;
                 return Ok(None);
             }
             Action::SetProvider(provider) => {
@@ -844,6 +903,9 @@ impl App {
                 CommandAction::ShowProviderSelector => {
                     return Ok(Some(Action::ShowProviderSelector));
                 }
+                CommandAction::ShowToolPermissions => {
+                    return Ok(Some(Action::ShowToolPermissions));
+                }
                 CommandAction::Download(ref media_id, ref dest_path) => {
                     let media_ref = self.find_media_ref(media_id);
                     match media_ref {
@@ -1109,6 +1171,14 @@ impl App {
 
             if let Some(ref picker) = self.policy_picker {
                 dialogs::draw_policy_picker(frame, area, picker);
+            }
+
+            if let Some(ref mut dialog) = self.tool_permissions_dialog {
+                dialogs::draw_tool_permissions(frame, area, dialog);
+            }
+
+            if let Some(ref dialog) = self.tool_approval_dialog {
+                dialogs::draw_tool_approval(frame, dialog);
             }
 
             if let Some(ref dialog) = self.totp_dialog {

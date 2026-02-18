@@ -113,4 +113,27 @@ impl App {
         self.vault_unlock_prompt = new_state;
         action
     }
+
+    pub fn handle_tool_permissions_key(&mut self, code: KeyCode) -> Action {
+        let Some(dialog) = self.tool_permissions_dialog.take() else {
+            return Action::Noop;
+        };
+        let (new_state, action) =
+            dialogs::handle_tool_permissions_key(dialog, code, &mut self.state.messages);
+        self.tool_permissions_dialog = new_state;
+        action
+    }
+
+    pub fn handle_tool_approval_key(&mut self, key: crossterm::event::KeyEvent) -> Action {
+        let Some(ref mut dialog) = self.tool_approval_dialog else {
+            return Action::Noop;
+        };
+        match dialogs::handle_tool_approval_key(dialog, key) {
+            Some(action) => {
+                self.tool_approval_dialog = None;
+                action
+            }
+            None => Action::Update,
+        }
+    }
 }

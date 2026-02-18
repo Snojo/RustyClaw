@@ -10,6 +10,8 @@ mod policy_picker;
 mod provider_selector;
 mod secret_viewer;
 mod totp;
+mod tool_approval;
+mod tool_permissions;
 mod vault_unlock;
 
 pub use api_key::{
@@ -39,6 +41,12 @@ pub use secret_viewer::{
 pub use totp::{TotpDialogPhase, TotpDialogState, draw_totp_dialog, handle_totp_dialog_key, handle_totp_dialog_key_gateway};
 pub use vault_unlock::{
     VaultUnlockPromptState, draw_vault_unlock_prompt, handle_vault_unlock_prompt_key,
+};
+pub use tool_permissions::{
+    ToolPermissionsState, draw_tool_permissions, handle_tool_permissions_key,
+};
+pub use tool_approval::{
+    ToolApprovalState, draw_tool_approval, handle_tool_approval_key,
 };
 
 /// Spinner frames for loading animations.

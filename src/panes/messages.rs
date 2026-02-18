@@ -50,6 +50,7 @@ impl MessagesPane {
             MessageRole::System => tp::MUTED,
             MessageRole::ToolCall => tp::MUTED,
             MessageRole::ToolResult => tp::TEXT_DIM,
+            MessageRole::Thinking => tp::MUTED,
         }
     }
 
@@ -60,6 +61,7 @@ impl MessagesPane {
             MessageRole::Assistant => Some(tp::BG_ASSISTANT),
             MessageRole::ToolCall => Some(tp::BG_CODE),
             MessageRole::ToolResult => Some(tp::BG_CODE),
+            MessageRole::Thinking => None,
             _ => None,
         }
     }
@@ -96,6 +98,9 @@ impl MessagesPane {
             MessageRole::System | MessageRole::Info | MessageRole::Success | MessageRole::Warning => {
                 (tp::BORDER_THIN, tp::bubble::system(), true)
             }
+            MessageRole::Thinking => {
+                (tp::BORDER_THIN, tp::bubble::thinking(), true)
+            }
         }
     }
 
@@ -105,6 +110,11 @@ impl MessagesPane {
     #[allow(dead_code)]
     fn should_show_icon(role: &MessageRole) -> bool {
         !matches!(role, MessageRole::User | MessageRole::Assistant)
+    }
+
+    /// Whether this role is a collapsible "thinking" message.
+    fn is_thinking(role: &MessageRole) -> bool {
+        matches!(role, MessageRole::Thinking)
     }
 
     /// Copy text to the system clipboard using platform-native tools.

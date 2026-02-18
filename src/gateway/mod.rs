@@ -611,6 +611,10 @@ async fn handle_connection(
     let tool_cancel: ToolCancelFlag = Arc::new(AtomicBool::new(false));
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<Message>(32);
 
+    // Channel for tool-approval responses (used by the Ask permission flow).
+    let (approval_tx, approval_rx) = tokio::sync::mpsc::channel::<(String, bool)>(4);
+    let approval_rx = Arc::new(Mutex::new(approval_rx));
+
     let reader_cancel = cancel.clone();
     let reader_tool_cancel = tool_cancel.clone();
     let reader_handle = tokio::spawn(async move {
@@ -632,6 +636,12 @@ async fn handle_connection(
                                     if frame.frame_type == ClientFrameType::Cancel {
                                         reader_tool_cancel.store(true, Ordering::Relaxed);
                                         continue;
+                                    }
+                                    if frame.frame_type == ClientFrameType::ToolApprovalResponse {
+                                        if let ClientPayload::ToolApprovalResponse { id, approved } = frame.payload {
+                                            let _ = approval_tx.send((id, approved)).await;
+                                            continue;
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -944,6 +954,8 @@ async fn handle_connection(
                                     &vault,
                                     &skill_mgr,
                                     &tool_cancel,
+                                    &shared_config,
+                                    &approval_rx,
                                 )
                                 .await
                                 {
@@ -957,8 +969,9 @@ async fn handle_connection(
                                     send_frame(&mut writer, &error_frame).await?;
                                 }
                             }
-                            ClientPayload::Empty | ClientPayload::AuthChallenge { .. } | ClientPayload::AuthResponse { .. } => {
-                                // These are handled in the auth phase, not here
+                            ClientPayload::Empty | ClientPayload::AuthChallenge { .. } | ClientPayload::AuthResponse { .. } | ClientPayload::ToolApprovalResponse { .. } => {
+                                // AuthChallenge/AuthResponse handled in auth phase.
+                                // ToolApprovalResponse handled by the reader task.
                             }
                         }
                     }
@@ -1011,6 +1024,8 @@ async fn dispatch_text_message(
     vault: &SharedVault,
     skill_mgr: &SharedSkillManager,
     tool_cancel: &ToolCancelFlag,
+    shared_config: &SharedConfig,
+    approval_rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<(String, bool)>>>,
 ) -> Result<()> {
     let mut resolved = match providers::resolve_request(req.clone(), model_ctx) {
         Ok(r) => r,
@@ -1214,32 +1229,140 @@ async fn dispatch_text_message(
         // ── Execute each requested tool ─────────────────────────────
         let mut tool_results: Vec<ToolCallResult> = Vec::new();
 
-        for tc in &model_resp.tool_calls {
-            // Notify the client about the tool call.
-            protocol::server::send_tool_call(
-                writer,
-                &tc.id,
-                &tc.name,
-                tc.arguments.clone(),
-            ).await?;
+        // Snapshot current tool permissions (cheap clone of a HashMap).
+        let tool_permissions = {
+            let cfg = shared_config.read().await;
+            cfg.tool_permissions.clone()
+        };
 
-            // Execute the tool.
-            let (output, is_error) = if tools::is_secrets_tool(&tc.name) {
-                // Secrets tools are handled here — they need vault access.
-                match secrets_handler::execute_secrets_tool(&tc.name, &tc.arguments, vault).await {
-                    Ok(text) => (text, false),
-                    Err(err) => (err, true),
+        for tc in &model_resp.tool_calls {
+            // ── Permission check ────────────────────────────────────
+            let permission = tool_permissions
+                .get(&tc.name)
+                .cloned()
+                .unwrap_or_default(); // default = Allow
+
+            let (output, is_error) = match permission {
+                tools::ToolPermission::Deny => {
+                    // Notify the client about the denied tool call.
+                    protocol::server::send_tool_call(
+                        writer,
+                        &tc.id,
+                        &tc.name,
+                        tc.arguments.clone(),
+                    ).await?;
+
+                    let msg = format!(
+                        "Tool '{}' is denied by user policy. The user has blocked this tool from being executed.",
+                        tc.name
+                    );
+                    (msg, true)
                 }
-            } else if tools::is_skill_tool(&tc.name) {
-                // Skill tools are handled here — they need SkillManager access.
-                match skills_handler::execute_skill_tool(&tc.name, &tc.arguments, skill_mgr).await {
-                    Ok(text) => (text, false),
-                    Err(err) => (err, true),
+                tools::ToolPermission::SkillOnly(_) => {
+                    // In direct chat, SkillOnly tools are denied.
+                    protocol::server::send_tool_call(
+                        writer,
+                        &tc.id,
+                        &tc.name,
+                        tc.arguments.clone(),
+                    ).await?;
+
+                    let msg = format!(
+                        "Tool '{}' is restricted to skill-based invocations only. It cannot be used in direct chat.",
+                        tc.name
+                    );
+                    (msg, true)
                 }
-            } else {
-                match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
-                    Ok(text) => (text, false),
-                    Err(err) => (err, true),
+                tools::ToolPermission::Ask => {
+                    // Send approval request to the TUI and wait for response.
+                    protocol::server::send_tool_approval_request(
+                        writer,
+                        &tc.id,
+                        &tc.name,
+                        tc.arguments.clone(),
+                    ).await?;
+
+                    // Wait for the user's response (with timeout).
+                    let approved = {
+                        let mut rx = approval_rx.lock().await;
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(120),
+                            rx.recv(),
+                        ).await {
+                            Ok(Some((id, approved))) if id == tc.id => approved,
+                            Ok(Some(_)) => false, // Mismatched ID — treat as denied
+                            Ok(None) => false,    // Channel closed
+                            Err(_) => false,      // Timeout
+                        }
+                    };
+
+                    if !approved {
+                        // Notify the client about the denied tool call.
+                        protocol::server::send_tool_call(
+                            writer,
+                            &tc.id,
+                            &tc.name,
+                            tc.arguments.clone(),
+                        ).await?;
+
+                        let msg = format!(
+                            "Tool '{}' was denied by the user.",
+                            tc.name
+                        );
+                        (msg, true)
+                    } else {
+                        // User approved — proceed with execution.
+                        protocol::server::send_tool_call(
+                            writer,
+                            &tc.id,
+                            &tc.name,
+                            tc.arguments.clone(),
+                        ).await?;
+
+                        if tools::is_secrets_tool(&tc.name) {
+                            match secrets_handler::execute_secrets_tool(&tc.name, &tc.arguments, vault).await {
+                                Ok(text) => (text, false),
+                                Err(err) => (err, true),
+                            }
+                        } else if tools::is_skill_tool(&tc.name) {
+                            match skills_handler::execute_skill_tool(&tc.name, &tc.arguments, skill_mgr).await {
+                                Ok(text) => (text, false),
+                                Err(err) => (err, true),
+                            }
+                        } else {
+                            match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
+                                Ok(text) => (text, false),
+                                Err(err) => (err, true),
+                            }
+                        }
+                    }
+                }
+                tools::ToolPermission::Allow => {
+                    // Notify the client about the tool call.
+                    protocol::server::send_tool_call(
+                        writer,
+                        &tc.id,
+                        &tc.name,
+                        tc.arguments.clone(),
+                    ).await?;
+
+                    // Execute the tool.
+                    if tools::is_secrets_tool(&tc.name) {
+                        match secrets_handler::execute_secrets_tool(&tc.name, &tc.arguments, vault).await {
+                            Ok(text) => (text, false),
+                            Err(err) => (err, true),
+                        }
+                    } else if tools::is_skill_tool(&tc.name) {
+                        match skills_handler::execute_skill_tool(&tc.name, &tc.arguments, skill_mgr).await {
+                            Ok(text) => (text, false),
+                            Err(err) => (err, true),
+                        }
+                    } else {
+                        match tools::execute_tool(&tc.name, &tc.arguments, workspace_dir) {
+                            Ok(text) => (text, false),
+                            Err(err) => (err, true),
+                        }
+                    }
                 }
             };
 
