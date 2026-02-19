@@ -150,12 +150,12 @@ fn parse_node(node: &str) -> NodeType {
     if node.starts_with("rdp:") {
         return parse_rdp_target(&node[4..]);
     }
-    
+
     // Heuristic: if it contains '@', treat as SSH
     if node.contains('@') {
         return parse_ssh_target(node);
     }
-    
+
     // Default to ADB for device-serial-like strings
     NodeType::Adb { device: node.to_string() }
 }
@@ -459,7 +459,7 @@ fn node_run(node: &str, command: &[impl AsRef<str>]) -> Result<String, String> {
     match parse_node(node) {
         NodeType::Ssh { user, host, port } => {
             let cmd_str = command.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(" ");
-            
+
             let output = Command::new("ssh")
                 .args([
                     "-o", "ConnectTimeout=10",
@@ -483,7 +483,7 @@ fn node_run(node: &str, command: &[impl AsRef<str>]) -> Result<String, String> {
         }
         NodeType::Adb { device } => {
             let cmd_str = command.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(" ");
-            
+
             let output = Command::new("adb")
                 .args(["-s", &device, "shell", &cmd_str])
                 .output()
@@ -514,12 +514,12 @@ fn node_run(node: &str, command: &[impl AsRef<str>]) -> Result<String, String> {
 /// Take a screenshot on any supported node type.
 fn node_screen_snap(node: &str, _facing: &str) -> Result<String, String> {
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    
+
     match parse_node(node) {
         NodeType::Adb { device } => {
             let remote_path = format!("/sdcard/rustyclaw_snap_{}.png", timestamp);
             let local_path = format!("/tmp/adb_snap_{}.png", timestamp);
-            
+
             // Take screenshot
             let output = Command::new("adb")
                 .args(["-s", &device, "shell", "screencap", "-p", &remote_path])
@@ -553,11 +553,11 @@ fn node_screen_snap(node: &str, _facing: &str) -> Result<String, String> {
                 "path": local_path
             }).to_string())
         }
-        
+
         NodeType::Ssh { user, host, port } => {
             // Take screenshot via SSH + scrot/import
             let local_path = format!("/tmp/ssh_snap_{}.png", timestamp);
-            
+
             let output = Command::new("ssh")
                 .args([
                     "-o", "ConnectTimeout=10",
@@ -582,10 +582,10 @@ fn node_screen_snap(node: &str, _facing: &str) -> Result<String, String> {
                 Err(format!("Screenshot failed (need scrot on remote): {}", err))
             }
         }
-        
+
         NodeType::Vnc { host, port, password } => {
             let local_path = format!("/tmp/vnc_snap_{}.png", timestamp);
-            
+
             // Try vncdo first, then vncdotool
             let mut cmd = if which::which("vncdo").is_ok() {
                 let mut c = Command::new("vncdo");
@@ -622,10 +622,10 @@ fn node_screen_snap(node: &str, _facing: &str) -> Result<String, String> {
                 Err(format!("VNC screenshot failed: {}", err))
             }
         }
-        
+
         NodeType::Rdp { user, host, port } => {
             let _local_path = format!("/tmp/rdp_snap_{}.png", timestamp);
-            
+
             // xfreerdp can take screenshots via /exec or by capturing initial frame
             // We'll use a quick connect + screenshot approach
             let xfreerdp = if which::which("xfreerdp3").is_ok() {
@@ -709,7 +709,7 @@ fn node_click(node: &str, x: i32, y: i32, button: &str) -> Result<String, String
                 Err(format!("VNC click failed: {}", err))
             }
         }
-        
+
         NodeType::Adb { device } => {
             // ADB input tap
             let output = Command::new("adb")
@@ -729,7 +729,7 @@ fn node_click(node: &str, x: i32, y: i32, button: &str) -> Result<String, String
                 Err(format!("ADB tap failed: {}", err))
             }
         }
-        
+
         NodeType::Ssh { user, host, port } => {
             // Use xdotool over SSH
             let output = Command::new("ssh")
@@ -755,7 +755,7 @@ fn node_click(node: &str, x: i32, y: i32, button: &str) -> Result<String, String
                 Err(format!("Click failed (need xdotool on remote): {}", err))
             }
         }
-        
+
         NodeType::Rdp { .. } => {
             Err("RDP click requires interactive session. Consider using VNC or SSH+xdotool.".to_string())
         }
@@ -800,7 +800,7 @@ fn node_type_text(node: &str, text: &str) -> Result<String, String> {
                 Err(format!("VNC type failed: {}", err))
             }
         }
-        
+
         NodeType::Adb { device } => {
             // Escape text for adb input
             let escaped = text.replace(' ', "%s").replace('\'', "\\'");
@@ -820,7 +820,7 @@ fn node_type_text(node: &str, text: &str) -> Result<String, String> {
                 Err(format!("ADB type failed: {}", err))
             }
         }
-        
+
         NodeType::Ssh { user, host, port } => {
             let output = Command::new("ssh")
                 .args([
@@ -844,7 +844,7 @@ fn node_type_text(node: &str, text: &str) -> Result<String, String> {
                 Err(format!("Type failed (need xdotool on remote): {}", err))
             }
         }
-        
+
         NodeType::Rdp { .. } => {
             Err("RDP typing requires interactive session.".to_string())
         }
@@ -889,7 +889,7 @@ fn node_send_key(node: &str, key: &str) -> Result<String, String> {
                 Err(format!("VNC key failed: {}", err))
             }
         }
-        
+
         NodeType::Adb { device } => {
             // Map common key names to Android keycodes
             let key_upper = key.to_uppercase();
@@ -925,7 +925,7 @@ fn node_send_key(node: &str, key: &str) -> Result<String, String> {
                 Err(format!("ADB keyevent failed: {}", err))
             }
         }
-        
+
         NodeType::Ssh { user, host, port } => {
             let output = Command::new("ssh")
                 .args([
@@ -949,7 +949,7 @@ fn node_send_key(node: &str, key: &str) -> Result<String, String> {
                 Err(format!("Key failed (need xdotool on remote): {}", err))
             }
         }
-        
+
         NodeType::Rdp { .. } => {
             Err("RDP key press requires interactive session.".to_string())
         }
@@ -980,7 +980,7 @@ fn node_notify(node: &str, title: &str, body: &str) -> Result<String, String> {
                 "status": status
             }).to_string())
         }
-        
+
         NodeType::Ssh { user, host, port } => {
             let output = Command::new("ssh")
                 .args([
@@ -1007,7 +1007,7 @@ fn node_notify(node: &str, title: &str, body: &str) -> Result<String, String> {
                 }).to_string())
             }
         }
-        
+
         NodeType::Vnc { .. } | NodeType::Rdp { .. } => {
             Err("Notifications require ADB or SSH (with notify-send on remote).".to_string())
         }

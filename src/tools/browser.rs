@@ -123,7 +123,7 @@ mod real {
     /// Open a new tab with URL.
     pub async fn open_tab(url: &str) -> Result<String, String> {
         ensure_browser().await?;
-        
+
         let mut state = browser_state().lock().await;
         let s = state.as_mut().ok_or("Browser not initialized")?;
 
@@ -412,7 +412,7 @@ mod real {
 }
 
 /// Execute browser tool action.
-/// 
+///
 /// When compiled with `browser` feature, uses real chromiumoxide CDP.
 /// Otherwise, returns helpful stub responses.
 pub fn exec_browser(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
@@ -448,7 +448,7 @@ async fn exec_browser_async(args: &Value, action: &str) -> Result<String, String
         "start" => real::start().await,
         "stop" => real::stop().await,
         "tabs" => real::list_tabs().await,
-        
+
         "open" => {
             let url = args.get("targetUrl")
                 .and_then(|v| v.as_str())
@@ -480,7 +480,7 @@ async fn exec_browser_async(args: &Value, action: &str) -> Result<String, String
         "act" => {
             let request = args.get("request")
                 .ok_or("Missing 'request' for act action")?;
-            
+
             let kind = request.get("kind")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'kind' in request")?;
