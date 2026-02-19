@@ -652,9 +652,11 @@ fn test_all_30_tools_have_tests() {
         "disk_usage", "classify_files", "system_monitor", "battery_health",
         "app_index", "cloud_browse", "browser_cache", "screenshot",
         "clipboard", "audit_sensitive", "secure_delete", "summarize_file",
+        // Sysadmin tools (6)
+        "pkg_manage", "net_info", "net_scan", "service_manage", "user_manage", "firewall",
         // Interactive (1)
         "ask_user",
     ];
 
-    assert_eq!(tools.len(), 49, "Should have exactly 49 tools");
+    assert_eq!(tools.len(), 55, "Should have exactly 55 tools");
 }

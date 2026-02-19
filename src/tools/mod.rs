@@ -19,6 +19,7 @@ mod browser;
 mod skills_tools;
 mod secrets_tools;
 mod system_tools;
+mod sysadmin;
 mod params;
 
 // Re-export helpers for external use
@@ -72,6 +73,12 @@ use system_tools::{
     exec_battery_health, exec_app_index, exec_cloud_browse,
     exec_browser_cache, exec_screenshot, exec_clipboard,
     exec_audit_sensitive, exec_secure_delete, exec_summarize_file,
+};
+
+// System administration tools
+use sysadmin::{
+    exec_pkg_manage, exec_net_info, exec_net_scan,
+    exec_service_manage, exec_user_manage, exec_firewall,
 };
 
 /// Stub executor for the `ask_user` tool — never called directly.
@@ -296,6 +303,12 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &AUDIT_SENSITIVE,
         &SECURE_DELETE,
         &SUMMARIZE_FILE,
+        &PKG_MANAGE,
+        &NET_INFO,
+        &NET_SCAN,
+        &SERVICE_MANAGE,
+        &USER_MANAGE,
+        &FIREWALL,
         &ASK_USER,
     ]
 }
@@ -740,6 +753,65 @@ pub static SUMMARIZE_FILE: ToolDef = ToolDef {
     execute: exec_summarize_file,
 };
 
+// ── System administration tools ─────────────────────────────────────────────
+
+pub static PKG_MANAGE: ToolDef = ToolDef {
+    name: "pkg_manage",
+    description: "Install, uninstall, upgrade, search, and list software packages. \
+                  Auto-detects the system package manager (brew, apt, dnf, pacman, \
+                  zypper, apk, snap, flatpak, port, nix-env) or use the manager \
+                  parameter to override. Also supports querying package info and \
+                  listing installed packages.",
+    parameters: vec![],
+    execute: exec_pkg_manage,
+};
+
+pub static NET_INFO: ToolDef = ToolDef {
+    name: "net_info",
+    description: "Query network information: interfaces, active connections, routing \
+                  table, DNS lookups, ping, traceroute, whois, ARP table, public IP, \
+                  Wi-Fi details, and bandwidth statistics.",
+    parameters: vec![],
+    execute: exec_net_info,
+};
+
+pub static NET_SCAN: ToolDef = ToolDef {
+    name: "net_scan",
+    description: "Network scanning and packet capture: run nmap scans (quick, full, \
+                  service, OS, UDP, vuln, ping, stealth), capture packets with tcpdump, \
+                  check if a specific port is open, listen for connections, sniff \
+                  traffic summaries, and discover hosts on the local network.",
+    parameters: vec![],
+    execute: exec_net_scan,
+};
+
+pub static SERVICE_MANAGE: ToolDef = ToolDef {
+    name: "service_manage",
+    description: "Manage system services: list running/loaded services, check status, \
+                  start, stop, restart, enable, disable, and view logs. Auto-detects \
+                  the init system (systemd, launchd, sysvinit).",
+    parameters: vec![],
+    execute: exec_service_manage,
+};
+
+pub static USER_MANAGE: ToolDef = ToolDef {
+    name: "user_manage",
+    description: "Manage system users and groups: whoami, list users, list groups, \
+                  get user info, add/remove users, add user to group, and view last \
+                  login history.",
+    parameters: vec![],
+    execute: exec_user_manage,
+};
+
+pub static FIREWALL: ToolDef = ToolDef {
+    name: "firewall",
+    description: "Manage the system firewall: check status, list rules, allow or deny \
+                  a port (TCP/UDP), enable or disable the firewall. Auto-detects the \
+                  firewall backend (pf, ufw, firewalld, iptables, nftables).",
+    parameters: vec![],
+    execute: exec_firewall,
+};
+
 // ── Interactive prompt tool ────────────────────────────────────────────────
 
 pub static ASK_USER: ToolDef = ToolDef {
@@ -839,6 +911,12 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "secure_delete" => secure_delete_params(),
         "summarize_file" => summarize_file_params(),
         "ask_user" => ask_user_params(),
+        "pkg_manage" => pkg_manage_params(),
+        "net_info" => net_info_params(),
+        "net_scan" => net_scan_params(),
+        "service_manage" => service_manage_params(),
+        "user_manage" => user_manage_params(),
+        "firewall" => firewall_params(),
         _ => vec![],
     }
 }
@@ -1211,7 +1289,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 55);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -1220,7 +1298,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 55);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -1228,7 +1306,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 55);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -1335,10 +1413,11 @@ mod tests {
     #[test]
     fn test_process_params_defined() {
         let params = process_params();
-        assert_eq!(params.len(), 5);
+        assert_eq!(params.len(), 6);
         assert!(params.iter().any(|p| p.name == "action" && p.required));
         assert!(params.iter().any(|p| p.name == "sessionId" && !p.required));
         assert!(params.iter().any(|p| p.name == "data" && !p.required));
+        assert!(params.iter().any(|p| p.name == "keys" && !p.required));
         assert!(params.iter().any(|p| p.name == "offset" && !p.required));
         assert!(params.iter().any(|p| p.name == "limit" && !p.required));
     }
@@ -1760,7 +1839,9 @@ mod tests {
         let args = json!({ "action": "snapshot" });
         let result = exec_canvas(&args, ws());
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("canvas snapshot"));
+        let output = result.unwrap();
+        // Without a URL presented first, snapshot returns no_canvas
+        assert!(output.contains("no_canvas") || output.contains("snapshot_captured"));
     }
 
     // ── skill tools ─────────────────────────────────────────────────

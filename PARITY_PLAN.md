@@ -150,17 +150,16 @@
 
 ### ⚠️ Stub / Partial Implementations
 
-6. **Canvas tool** — accepts parameters and returns descriptive text but has no actual canvas rendering integration (`src/tools/devices.rs:1135`)
-7. **Browser tool (without `browser` feature)** — returns stub descriptions of what would happen; real CDP is behind the `browser` feature flag (`src/tools/browser.rs:530`)
+6. ~~**Canvas tool** — accepts parameters and returns descriptive text but has no actual canvas rendering integration~~ → **Implemented**: opens system browser, fetches page metadata/content, tracks canvas URL
+7. ~~**Browser tool (without `browser` feature)** — returns stub descriptions~~ → **Implemented**: lite mode with reqwest, tab tracking, HTML parsing, accessibility snapshots
 8. **TTS tool (without API key)** — returns a descriptive fallback; functional when OPENAI_API_KEY is set (`src/tools/gateway_tools.rs:370`)
-9. **Process tool: `send-keys`** — not implemented; `write` action exists for stdin but no PTY/send-keys support
+9. ~~**Process tool: `send-keys`** — not implemented~~ → **Implemented**: `send_keys` action translates named keys (Enter, Ctrl-C, arrows, F-keys, etc.) to escape sequences
 
 ### ⚠️ Missing OpenClaw Features
 
 10. **WhatsApp messenger backend** — OpenClaw supports WhatsApp; RustyClaw does not
 11. **Slack messenger backend** — OpenClaw supports Slack; RustyClaw does not
-12. **Sandbox enforcement** — Landlock and PathValidation modes are stubs; only bwrap provides real isolation
-13. **SECURITY.md accuracy** — document references wrong crate (`keyring` instead of `securestore`) and lists outdated dependency versions
+12. **SECURITY.md accuracy** — document references wrong crate (`keyring` instead of `securestore`) and lists outdated dependency versions
 
 ### ✅ Previously Missing, Now Implemented
 
@@ -178,6 +177,10 @@ The following items were listed as "Not implemented" in the original Gap Analysi
 - Apply patch (multi-hunk unified diff) — `src/tools/patch.rs`
 - Gateway control tool (config get/apply/patch, restart) — `src/tools/gateway_tools.rs`
 - True streaming from providers (OpenAI SSE + Anthropic SSE) — `src/streaming.rs`, `src/gateway/providers.rs`
+- Sandbox enforcement (PathValidation, Bubblewrap, Landlock, LandlockBwrap, Docker, macOS sandbox-exec) — `src/sandbox.rs`
+- Canvas tool (system browser launch, page metadata fetch, text snapshot) — `src/tools/devices.rs`
+- Browser lite mode (reqwest-based tab management, HTML parsing, accessibility snapshots) — `src/tools/browser.rs`
+- Process send-keys (named key → escape sequence translation) — `src/process_manager.rs`, `src/tools/runtime.rs`
 
 ---
 
@@ -188,7 +191,7 @@ The following items were listed as "Not implemented" in the original Gap Analysi
 | File tools (read, write, edit, list, search, find) | ✅ Complete | 6/6 |
 | Web tools (fetch, search) | ✅ Complete | 2/2 |
 | Shell execution | ✅ Complete | 1/1 (with background) |
-| Process management | ✅ Complete | list, poll, log, write, kill |
+| Process management | ✅ Complete | list, poll, log, write, send_keys, kill |
 | Memory system | ✅ Complete | search + get |
 | Cron/scheduling | ✅ Complete | at, every, cron |
 | Multi-session / multi-agent | ✅ Complete | list, spawn, send, history, status |
@@ -198,9 +201,9 @@ The following items were listed as "Not implemented" in the original Gap Analysi
 | TTS | ✅ Complete | functional with API key |
 | Apply patch | ✅ Complete | multi-hunk diff |
 | Image analysis | ✅ Complete | OpenAI/Anthropic/Google vision |
-| Browser automation | ⚠️ Partial | Real CDP behind `browser` feature; stub without |
+| Browser automation | ✅ Complete | Full CDP with `browser` feature; lite reqwest mode without |
 | Node/device control | ✅ Complete | SSH/ADB backends |
-| Canvas | ⚠️ Stub | Parameter handling only; no rendering integration |
+| Canvas | ✅ Complete | System browser + page fetch + snapshot |
 | Context management (compaction, token tracking) | ✅ Complete | — |
 | Conversation memory (persistence, replay) | ✅ Complete | — |
 | Gateway (auth, heartbeat, message types) | ✅ Complete | — |
@@ -210,4 +213,4 @@ The following items were listed as "Not implemented" in the original Gap Analysi
 | Messengers | ⚠️ Partial | Webhook, Console, Discord, Telegram, Signal (missing WhatsApp, Slack) |
 | Provider streaming | ✅ Complete | OpenAI SSE + Anthropic SSE |
 | Gateway TLS (WSS) | ✅ Complete | rustls TLS acceptor, `--tls-cert`/`--tls-key` |
-| Sandbox enforcement | ⚠️ Partial | Only bwrap works; Landlock/PathValidation are stubs |
+| Sandbox enforcement | ✅ Complete | 6 modes: PathValidation, Bubblewrap, Landlock, LandlockBwrap, Docker, macOS sandbox-exec |

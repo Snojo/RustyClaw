@@ -253,19 +253,25 @@ pub fn process_params() -> Vec<ToolParam> {
     vec![
         ToolParam {
             name: "action".into(),
-            description: "Action to perform: 'list', 'poll', 'log', 'write', 'kill', 'clear', 'remove'.".into(),
+            description: "Action to perform: 'list', 'poll', 'log', 'write', 'send_keys', 'kill', 'clear', 'remove'.".into(),
             param_type: "string".into(),
             required: true,
         },
         ToolParam {
             name: "sessionId".into(),
-            description: "Session ID for poll/log/write/kill/remove actions.".into(),
+            description: "Session ID for poll/log/write/send_keys/kill/remove actions.".into(),
             param_type: "string".into(),
             required: false,
         },
         ToolParam {
             name: "data".into(),
             description: "Data to write to stdin (for 'write' action).".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "keys".into(),
+            description: "Space-separated key names to send (for 'send_keys' action). Supports: Enter, Tab, Escape, Space, Backspace, Up, Down, Left, Right, Home, End, PageUp, PageDown, Delete, Insert, Ctrl-A..Ctrl-Z, F1..F12, or literal text.".into(),
             param_type: "string".into(),
             required: false,
         },
@@ -1159,6 +1165,208 @@ pub fn ask_user_params() -> Vec<ToolParam> {
                           Example: [{\"name\":\"host\",\"label\":\"Hostname\",\"required\":true}]"
                 .into(),
             param_type: "array".into(),
+            required: false,
+        },
+    ]
+}
+
+// ── Sysadmin tools ──────────────────────────────────────────────────────────
+
+pub fn pkg_manage_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action to perform: 'install', 'uninstall', 'upgrade', 'search', \
+                          'list', 'info', 'detect'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "package".into(),
+            description: "Package name for install/uninstall/upgrade/search/info actions. \
+                          For search, this is the query string."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "manager".into(),
+            description: "Override auto-detected package manager (brew, apt, dnf, pacman, etc.). \
+                          Omit to auto-detect."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+pub fn net_info_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action to perform: 'interfaces', 'connections', 'routing', 'dns', \
+                          'ping', 'traceroute', 'whois', 'arp', 'public_ip', 'wifi', 'bandwidth'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "target".into(),
+            description: "Target host/IP for ping, traceroute, dns, whois. \
+                          Filter string for connections."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "count".into(),
+            description: "Number of pings to send (default: 4).".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+    ]
+}
+
+pub fn net_scan_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Scan action: 'nmap', 'tcpdump', 'port_check', 'listen', \
+                          'sniff', 'discover'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "target".into(),
+            description: "Target host/IP/subnet for nmap, port_check, discover. \
+                          BPF filter expression for tcpdump."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "scan_type".into(),
+            description: "nmap scan type: 'quick' (default), 'full', 'service', 'os', \
+                          'udp', 'vuln', 'ping', 'stealth'."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "ports".into(),
+            description: "Port range for nmap (e.g. '80,443' or '1-1024'). \
+                          Single port for port_check."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "interface".into(),
+            description: "Network interface for tcpdump/sniff (default: 'any').".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "count".into(),
+            description: "Number of packets to capture for tcpdump (default: 20).".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "seconds".into(),
+            description: "Duration in seconds for sniff action (default: 5).".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "port".into(),
+            description: "Single port number for port_check action.".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+    ]
+}
+
+pub fn service_manage_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action: 'list', 'status', 'start', 'stop', 'restart', \
+                          'enable', 'disable', 'logs'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "service".into(),
+            description: "Service name for status/start/stop/restart/enable/disable/logs. \
+                          Filter string for list."
+                .into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "lines".into(),
+            description: "Number of log lines to show (default: 50). Used with 'logs' action."
+                .into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+    ]
+}
+
+pub fn user_manage_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action: 'whoami', 'list_users', 'list_groups', 'user_info', \
+                          'add_user', 'remove_user', 'add_to_group', 'last_logins'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "name".into(),
+            description: "Username for user_info, add_user, remove_user, add_to_group.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "group".into(),
+            description: "Group name for add_to_group action.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "shell".into(),
+            description: "Login shell for add_user (default: /bin/bash). Linux only.".into(),
+            param_type: "string".into(),
+            required: false,
+        },
+    ]
+}
+
+pub fn firewall_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "action".into(),
+            description: "Action: 'status', 'rules', 'allow', 'deny', 'enable', 'disable'."
+                .into(),
+            param_type: "string".into(),
+            required: true,
+        },
+        ToolParam {
+            name: "port".into(),
+            description: "Port number for allow/deny actions.".into(),
+            param_type: "integer".into(),
+            required: false,
+        },
+        ToolParam {
+            name: "protocol".into(),
+            description: "Protocol for allow/deny: 'tcp' (default) or 'udp'.".into(),
+            param_type: "string".into(),
             required: false,
         },
     ]

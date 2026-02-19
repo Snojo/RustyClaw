@@ -548,57 +548,456 @@ async fn exec_browser_async(args: &Value, action: &str) -> Result<String, String
 }
 
 #[cfg(not(feature = "browser"))]
+mod lite {
+    //! Lightweight browser automation without CDP.
+    //!
+    //! Uses reqwest to fetch pages, parses HTML to extract interactive elements,
+    //! links, and text content.  Tracks "tabs" (URL + cached content) in memory.
+
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    /// A lightweight "tab" backed by reqwest.
+    struct LiteTab {
+        url: String,
+        title: String,
+        body: String,           // raw HTML
+        text_content: String,   // stripped text
+        links: Vec<Value>,
+        forms: Vec<Value>,
+        interactive: Vec<Value>,
+    }
+
+    /// Global tab store.
+    struct LiteBrowser {
+        tabs: HashMap<String, LiteTab>,
+        next_id: usize,
+    }
+
+    static LITE: OnceLock<Mutex<LiteBrowser>> = OnceLock::new();
+
+    fn browser() -> &'static Mutex<LiteBrowser> {
+        LITE.get_or_init(|| {
+            Mutex::new(LiteBrowser {
+                tabs: HashMap::new(),
+                next_id: 0,
+            })
+        })
+    }
+
+    fn http_client() -> Result<reqwest::blocking::Client, String> {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent(
+                "Mozilla/5.0 (compatible; RustyClaw/0.1; +https://github.com/RustyClaw)",
+            )
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .map_err(|e| format!("HTTP client error: {}", e))
+    }
+
+    /// Fetch a URL and build a LiteTab from the response.
+    fn fetch_tab(url: &str) -> Result<LiteTab, String> {
+        let client = http_client()?;
+        let resp = client
+            .get(url)
+            .send()
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+
+        let body = resp
+            .text()
+            .map_err(|e| format!("Failed to read body: {}", e))?;
+
+        let title = extract_tag(&body, "title").unwrap_or_default();
+        let links = extract_links(&body);
+        let forms = extract_forms(&body);
+        let interactive = extract_interactive(&body);
+        let text_content = strip_html(&body);
+
+        Ok(LiteTab {
+            url: url.to_string(),
+            title,
+            body,
+            text_content,
+            links,
+            forms,
+            interactive,
+        })
+    }
+
+    // ── HTML helpers ────────────────────────────────────────────────────────
+
+    fn extract_tag(html: &str, tag: &str) -> Option<String> {
+        let lower = html.to_lowercase();
+        let open = format!("<{}", tag);
+        let close = format!("</{}>", tag);
+        let start = lower.find(&open)?;
+        let after = html[start..].find('>')? + start + 1;
+        let end = lower[after..].find(&close)? + after;
+        Some(html[after..end].trim().to_string())
+    }
+
+    fn strip_html(html: &str) -> String {
+        let mut out = String::with_capacity(html.len() / 2);
+        let mut in_tag = false;
+        let mut last_space = false;
+        for ch in html.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => {
+                    in_tag = false;
+                    if !last_space {
+                        out.push(' ');
+                        last_space = true;
+                    }
+                }
+                _ if !in_tag => {
+                    if ch.is_whitespace() {
+                        if !last_space {
+                            out.push(' ');
+                            last_space = true;
+                        }
+                    } else {
+                        out.push(ch);
+                        last_space = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.trim().to_string()
+    }
+
+    /// Extract `<a href="…">text</a>` into JSON values.
+    fn extract_links(html: &str) -> Vec<Value> {
+        let mut links = Vec::new();
+        let lower = html.to_lowercase();
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find("<a ") {
+            let abs = search_from + pos;
+            let tag_end = match lower[abs..].find('>') {
+                Some(e) => abs + e,
+                None => break,
+            };
+            let close = match lower[tag_end..].find("</a>") {
+                Some(c) => tag_end + c,
+                None => {
+                    search_from = tag_end + 1;
+                    continue;
+                }
+            };
+            let tag_str = &html[abs..tag_end + 1];
+            let href = attr_value(tag_str, "href").unwrap_or_default();
+            let text = strip_html(&html[tag_end + 1..close]);
+            if !href.is_empty() {
+                links.push(json!({
+                    "tag": "a",
+                    "href": href,
+                    "text": if text.len() > 80 { format!("{}…", &text[..80]) } else { text },
+                }));
+            }
+            if links.len() >= 50 {
+                break;
+            }
+            search_from = close + 4;
+        }
+        links
+    }
+
+    /// Extract `<form …>` tags.
+    fn extract_forms(html: &str) -> Vec<Value> {
+        let mut forms = Vec::new();
+        let lower = html.to_lowercase();
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find("<form") {
+            let abs = search_from + pos;
+            let tag_end = match lower[abs..].find('>') {
+                Some(e) => abs + e,
+                None => break,
+            };
+            let tag_str = &html[abs..tag_end + 1];
+            let action = attr_value(tag_str, "action").unwrap_or_default();
+            let method = attr_value(tag_str, "method").unwrap_or_else(|| "GET".into());
+            forms.push(json!({
+                "tag": "form",
+                "action": action,
+                "method": method.to_uppercase(),
+            }));
+            if forms.len() >= 20 {
+                break;
+            }
+            search_from = tag_end + 1;
+        }
+        forms
+    }
+
+    /// Extract interactive elements (buttons, inputs, selects, textareas).
+    fn extract_interactive(html: &str) -> Vec<Value> {
+        let mut elements = Vec::new();
+        let tags = ["button", "input", "select", "textarea"];
+        let lower = html.to_lowercase();
+
+        for tag_name in &tags {
+            let open = format!("<{}", tag_name);
+            let mut search_from = 0;
+            while let Some(pos) = lower[search_from..].find(&open) {
+                let abs = search_from + pos;
+                let tag_end = match lower[abs..].find('>') {
+                    Some(e) => abs + e,
+                    None => break,
+                };
+                let tag_str = &html[abs..tag_end + 1];
+                let mut elem = json!({
+                    "tag": tag_name,
+                    "ref": format!("e{}", elements.len()),
+                });
+                if let Some(t) = attr_value(tag_str, "type") {
+                    elem["type"] = json!(t);
+                }
+                if let Some(n) = attr_value(tag_str, "name") {
+                    elem["name"] = json!(n);
+                }
+                if let Some(p) = attr_value(tag_str, "placeholder") {
+                    elem["placeholder"] = json!(p);
+                }
+                if let Some(v) = attr_value(tag_str, "value") {
+                    elem["value"] = json!(v);
+                }
+                if let Some(l) = attr_value(tag_str, "aria-label") {
+                    elem["aria-label"] = json!(l);
+                }
+                elements.push(elem);
+                if elements.len() >= 50 {
+                    break;
+                }
+                search_from = tag_end + 1;
+            }
+            if elements.len() >= 50 {
+                break;
+            }
+        }
+        elements
+    }
+
+    /// Extract a single HTML attribute value from a tag string.
+    fn attr_value(tag: &str, attr: &str) -> Option<String> {
+        let lower = tag.to_lowercase();
+        let needle = format!("{}=\"", attr);
+        let pos = lower.find(&needle)?;
+        let start = pos + needle.len();
+        let end = lower[start..].find('"')? + start;
+        Some(tag[start..end].to_string())
+    }
+
+    // ── Public API ──────────────────────────────────────────────────────────
+
+    pub fn status() -> Result<String, String> {
+        let br = browser().lock().map_err(|_| "lock poisoned")?;
+        Ok(json!({
+            "running": true,
+            "mode": "lite",
+            "tabs": br.tabs.len(),
+            "profile": "rustyclaw",
+            "note": "Lite mode (reqwest). Build with --features browser for full CDP.",
+        })
+        .to_string())
+    }
+
+    pub fn start() -> Result<String, String> {
+        // No-op in lite mode; browser() initialises lazily
+        Ok("Browser lite mode ready (reqwest-based). No external browser needed.".to_string())
+    }
+
+    pub fn stop() -> Result<String, String> {
+        let mut br = browser().lock().map_err(|_| "lock poisoned")?;
+        br.tabs.clear();
+        br.next_id = 0;
+        Ok("Lite browser state cleared.".to_string())
+    }
+
+    pub fn list_tabs() -> Result<String, String> {
+        let br = browser().lock().map_err(|_| "lock poisoned")?;
+        let tabs: Vec<Value> = br
+            .tabs
+            .iter()
+            .map(|(id, t)| {
+                json!({
+                    "id": id,
+                    "url": t.url,
+                    "title": t.title,
+                })
+            })
+            .collect();
+        Ok(json!({ "tabs": tabs }).to_string())
+    }
+
+    pub fn open_tab(url: &str) -> Result<String, String> {
+        let tab = fetch_tab(url)?;
+        let mut br = browser().lock().map_err(|_| "lock poisoned")?;
+        let id = format!("tab_{}", br.next_id);
+        br.next_id += 1;
+        let title = tab.title.clone();
+        br.tabs.insert(id.clone(), tab);
+        Ok(json!({
+            "success": true,
+            "tabId": id,
+            "url": url,
+            "title": title,
+        })
+        .to_string())
+    }
+
+    pub fn navigate(tab_id: Option<&str>, url: &str) -> Result<String, String> {
+        let tab = fetch_tab(url)?;
+        let mut br = browser().lock().map_err(|_| "lock poisoned")?;
+        let id = match tab_id {
+            Some(id) => {
+                if !br.tabs.contains_key(id) {
+                    return Err(format!("Tab not found: {}", id));
+                }
+                id.to_string()
+            }
+            None => br
+                .tabs
+                .keys()
+                .next()
+                .cloned()
+                .ok_or("No tabs open")?,
+        };
+        let title = tab.title.clone();
+        br.tabs.insert(id, tab);
+        Ok(json!({
+            "success": true,
+            "url": url,
+            "title": title,
+        })
+        .to_string())
+    }
+
+    pub fn snapshot(tab_id: Option<&str>) -> Result<String, String> {
+        let br = browser().lock().map_err(|_| "lock poisoned")?;
+        let tab = match tab_id {
+            Some(id) => br.tabs.get(id).ok_or_else(|| format!("Tab not found: {}", id))?,
+            None => br.tabs.values().next().ok_or("No tabs open")?,
+        };
+        Ok(json!({
+            "title": tab.title,
+            "url": tab.url,
+            "elements": tab.interactive,
+            "links": tab.links.len(),
+            "forms": tab.forms.len(),
+        })
+        .to_string())
+    }
+
+    pub fn get_content(tab_id: Option<&str>) -> Result<String, String> {
+        let br = browser().lock().map_err(|_| "lock poisoned")?;
+        let tab = match tab_id {
+            Some(id) => br.tabs.get(id).ok_or_else(|| format!("Tab not found: {}", id))?,
+            None => br.tabs.values().next().ok_or("No tabs open")?,
+        };
+        let text = &tab.text_content;
+        if text.len() > 50_000 {
+            Ok(format!("{}…\n\n[truncated at 50KB]", &text[..50_000]))
+        } else {
+            Ok(text.clone())
+        }
+    }
+
+    pub fn screenshot() -> Result<String, String> {
+        Ok(json!({
+            "note": "Screenshots require the 'browser' feature (CDP). Use 'snapshot' for an accessibility-style view of the page.",
+        })
+        .to_string())
+    }
+
+    pub fn close_tab(tab_id: &str) -> Result<String, String> {
+        let mut br = browser().lock().map_err(|_| "lock poisoned")?;
+        if br.tabs.remove(tab_id).is_some() {
+            Ok(json!({ "success": true, "closed": tab_id }).to_string())
+        } else {
+            Err(format!("Tab not found: {}", tab_id))
+        }
+    }
+}
+
+#[cfg(not(feature = "browser"))]
 fn exec_browser_stub(args: &Value, action: &str) -> Result<String, String> {
-    let _profile = args
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .unwrap_or("openclaw");
+    let tab_id = args.get("targetId").and_then(|v| v.as_str());
 
     match action {
-        "status" => Ok(json!({
-            "running": false,
-            "note": "Browser automation requires the 'browser' feature. Build with: cargo build --features browser"
-        }).to_string()),
+        "status" => lite::status(),
+        "start" => lite::start(),
+        "stop" => lite::stop(),
+        "tabs" => lite::list_tabs(),
 
-        "start" => Ok("Browser automation requires the 'browser' feature.\nBuild with: cargo build --features browser".to_string()),
+        "open" => {
+            let url = args
+                .get("targetUrl")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'targetUrl' for open action")?;
+            lite::open_tab(url)
+        }
 
-        "stop" => Ok("Browser not running (feature not enabled).".to_string()),
+        "navigate" => {
+            let url = args
+                .get("targetUrl")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'targetUrl' for navigate action")?;
+            lite::navigate(tab_id, url)
+        }
+
+        "screenshot" => lite::screenshot(),
+        "snapshot" => lite::snapshot(tab_id),
+        "close" => {
+            let id = tab_id.ok_or("Missing 'targetId' for close action")?;
+            lite::close_tab(id)
+        }
+
+        "act" => {
+            let request = args
+                .get("request")
+                .ok_or("Missing 'request' for act action")?;
+            let kind = request
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'kind' in request")?;
+
+            match kind {
+                "click" | "type" | "press" => Ok(json!({
+                    "note": format!("Action '{}' requires the 'browser' feature (CDP). Use 'snapshot' to see interactive elements.", kind),
+                })
+                .to_string()),
+                "evaluate" => Ok(json!({
+                    "note": "JavaScript evaluation requires the 'browser' feature (CDP). Use 'get_content' for page text.",
+                })
+                .to_string()),
+                _ => Err(format!("Unknown act kind: {}", kind)),
+            }
+        }
+
+        "content" | "get_content" => lite::get_content(tab_id),
 
         "profiles" => Ok(json!({
             "profiles": ["rustyclaw"],
-            "note": "Build with --features browser to enable automation"
-        }).to_string()),
+            "current": "rustyclaw",
+            "mode": "lite",
+        })
+        .to_string()),
 
-        "tabs" => Ok(json!({
-            "tabs": [],
-            "note": "Browser feature not enabled"
-        }).to_string()),
-
-        "open" => {
-            let url = args.get("targetUrl").and_then(|v| v.as_str()).unwrap_or("(none)");
-            Ok(format!(
-                "Would open URL: {}\nEnable with: cargo build --features browser",
-                url
-            ))
-        }
-
-        "snapshot" => Ok(json!({
-            "note": "Browser feature not enabled. Build with --features browser"
-        }).to_string()),
-
-        "screenshot" => Ok(json!({
-            "note": "Browser feature not enabled. Build with --features browser"
-        }).to_string()),
-
-        "navigate" | "focus" | "close" | "console" | "pdf" | "act" => {
-            Ok(format!(
-                "Action '{}' requires browser feature. Build with: cargo build --features browser",
-                action
-            ))
-        }
+        "console" | "pdf" | "focus" => Ok(json!({
+            "note": format!("Action '{}' requires the 'browser' feature (CDP).", action),
+        })
+        .to_string()),
 
         _ => Err(format!(
-            "Unknown action: {}. Valid: status, start, stop, profiles, tabs, open, focus, close, snapshot, screenshot, navigate, console, pdf, act",
+            "Unknown action: {}. Valid: status, start, stop, tabs, open, navigate, snapshot, screenshot, close, act, content, profiles",
             action
         )),
     }

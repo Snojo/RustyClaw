@@ -303,6 +303,24 @@ pub fn exec_process(args: &Value, _workspace_dir: &Path) -> Result<String, Strin
             Ok(format!("Wrote {} bytes to session {}", data.len(), id))
         }
 
+        "send_keys" | "sendkeys" | "send-keys" => {
+            let id = session_id.ok_or("Missing sessionId for send_keys action")?;
+            let keys = args
+                .get("keys")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'keys' for send_keys action (e.g. \"Enter\", \"Ctrl-C\", \"Up Up Down\")")?;
+
+            let session = mgr
+                .get_mut(id)
+                .ok_or_else(|| format!("No session found: {}", id))?;
+
+            let bytes_sent = session.send_keys(keys)?;
+            Ok(format!(
+                "Sent keys [{}] ({} bytes) to session {}",
+                keys, bytes_sent, id
+            ))
+        }
+
         "kill" => {
             let id = session_id.ok_or("Missing sessionId for kill action")?;
 
@@ -334,7 +352,7 @@ pub fn exec_process(args: &Value, _workspace_dir: &Path) -> Result<String, Strin
         }
 
         _ => Err(format!(
-            "Unknown action: {}. Valid: list, poll, log, write, kill, clear, remove",
+            "Unknown action: {}. Valid: list, poll, log, write, send_keys, kill, clear, remove",
             action
         )),
     }

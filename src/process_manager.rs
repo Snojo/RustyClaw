@@ -251,6 +251,35 @@ impl ExecSession {
         Ok(())
     }
 
+    /// Translate named keys to escape sequences and write them to stdin.
+    ///
+    /// Supports key names: Enter, Tab, Escape, Space, Backspace,
+    /// Up, Down, Left, Right, Home, End, PageUp, PageDown, Delete, Insert,
+    /// Ctrl-A..Ctrl-Z, Ctrl-C, F1..F12, and plain text.
+    ///
+    /// Multiple keys can be separated by spaces:  `"Enter"`, `"Ctrl-C"`,
+    /// `"Up Up Down Down Left Right"`.
+    pub fn send_keys(&mut self, keys: &str) -> Result<usize, String> {
+        let bytes = translate_keys(keys)?;
+        let len = bytes.len();
+
+        let Some(ref mut child) = self.child else {
+            return Err("Process has exited".to_string());
+        };
+        let Some(ref mut stdin) = child.stdin else {
+            return Err("Process stdin not available".to_string());
+        };
+
+        stdin
+            .write_all(&bytes)
+            .map_err(|e| format!("Failed to send keys: {}", e))?;
+        stdin
+            .flush()
+            .map_err(|e| format!("Failed to flush after send-keys: {}", e))?;
+
+        Ok(len)
+    }
+
     /// Kill the process.
     pub fn kill(&mut self) -> Result<(), String> {
         let Some(ref mut child) = self.child else {
@@ -300,6 +329,82 @@ fn read_nonblocking<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<
     // On non-Unix, just try a regular read with a short timeout
     // This is a simplified fallback
     Ok(0)
+}
+
+// ── Key translation ─────────────────────────────────────────────────────────
+
+/// Translate a space-separated list of named keys into raw bytes.
+///
+/// Each token is matched case-insensitively against known key names.
+/// Unrecognised tokens are sent as literal UTF-8 text.
+pub fn translate_keys(keys: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+
+    for token in keys.split_whitespace() {
+        match token.to_lowercase().as_str() {
+            // Basic control characters
+            "enter" | "return" | "cr" => out.push(b'\n'),
+            "tab" => out.push(b'\t'),
+            "escape" | "esc" => out.push(0x1b),
+            "space" => out.push(b' '),
+            "backspace" | "bs" => out.push(0x7f),
+            "delete" | "del" => out.extend_from_slice(b"\x1b[3~"),
+            "insert" | "ins" => out.extend_from_slice(b"\x1b[2~"),
+
+            // Arrow keys
+            "up" => out.extend_from_slice(b"\x1b[A"),
+            "down" => out.extend_from_slice(b"\x1b[B"),
+            "right" => out.extend_from_slice(b"\x1b[C"),
+            "left" => out.extend_from_slice(b"\x1b[D"),
+
+            // Navigation
+            "home" => out.extend_from_slice(b"\x1b[H"),
+            "end" => out.extend_from_slice(b"\x1b[F"),
+            "pageup" | "pgup" => out.extend_from_slice(b"\x1b[5~"),
+            "pagedown" | "pgdn" => out.extend_from_slice(b"\x1b[6~"),
+
+            // Function keys
+            "f1" => out.extend_from_slice(b"\x1bOP"),
+            "f2" => out.extend_from_slice(b"\x1bOQ"),
+            "f3" => out.extend_from_slice(b"\x1bOR"),
+            "f4" => out.extend_from_slice(b"\x1bOS"),
+            "f5" => out.extend_from_slice(b"\x1b[15~"),
+            "f6" => out.extend_from_slice(b"\x1b[17~"),
+            "f7" => out.extend_from_slice(b"\x1b[18~"),
+            "f8" => out.extend_from_slice(b"\x1b[19~"),
+            "f9" => out.extend_from_slice(b"\x1b[20~"),
+            "f10" => out.extend_from_slice(b"\x1b[21~"),
+            "f11" => out.extend_from_slice(b"\x1b[23~"),
+            "f12" => out.extend_from_slice(b"\x1b[24~"),
+
+            // Ctrl- combinations
+            other if other.starts_with("ctrl-") || other.starts_with("c-") => {
+                let ch = other.rsplit('-').next().unwrap_or("");
+                if ch.len() == 1 {
+                    let b = ch.as_bytes()[0];
+                    // Ctrl-A = 0x01, Ctrl-Z = 0x1A, Ctrl-[ = 0x1B, etc.
+                    let ctrl = match b {
+                        b'a'..=b'z' => b - b'a' + 1,
+                        b'@' => 0,
+                        b'[' => 0x1b,
+                        b'\\' => 0x1c,
+                        b']' => 0x1d,
+                        b'^' => 0x1e,
+                        b'_' => 0x1f,
+                        _ => return Err(format!("Unknown Ctrl- key: {}", token)),
+                    };
+                    out.push(ctrl);
+                } else {
+                    return Err(format!("Invalid Ctrl- key: {}", token));
+                }
+            }
+
+            // Literal text fallback
+            _ => out.extend_from_slice(token.as_bytes()),
+        }
+    }
+
+    Ok(out)
 }
 
 /// Global process session manager.
