@@ -214,3 +214,25 @@ The following items were listed as "Not implemented" in the original Gap Analysi
 | Provider streaming | ✅ Complete | OpenAI SSE + Anthropic SSE |
 | Gateway TLS (WSS) | ✅ Complete | rustls TLS acceptor, `--tls-cert`/`--tls-key` |
 | Sandbox enforcement | ✅ Complete | 6 modes: PathValidation, Bubblewrap, Landlock, LandlockBwrap, Docker, macOS sandbox-exec |
+
+---
+
+## Phase 9 — Learning & Evolution (Planned)
+
+See [docs/LEARNING_ANALYSIS.md](docs/LEARNING_ANALYSIS.md) for full analysis and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for implementation details.
+
+| Task | Status | Priority | Notes |
+|------|--------|----------|-------|
+| Pre-compaction memory flush | 🔲 Planned | P0 | Silent agent turn before compaction |
+| Workspace file injection | 🔲 Planned | P0 | SOUL.md, MEMORY.md, etc. in prompts |
+| Startup memory loading | 🔲 Planned | P1 | Load today/yesterday daily notes |
+| Recency-weighted BM25 | 🔲 Planned | P1 | Boost recent files in search |
+| Update SOUL.md defaults | 🔲 Planned | P1 | Add learning guidance |
+| Local vector embeddings | 🔲 Planned | P2 | fastembed integration |
+| Hybrid BM25 + vector search | 🔲 Planned | P2 | Combined scoring |
+| Session transcript indexing | 🔲 Planned | P2 | Search past conversations |
+| Native heartbeat system | 🔲 Planned | P3 | Periodic agent self-checks |
+| MMR diversity re-ranking | 🔲 Planned | P3 | Reduce redundant results |
+| Temporal decay | 🔲 Planned | P3 | Time-based score weighting |
+
+**Timeline:** ~4 weeks (see IMPLEMENTATION_PLAN.md for weekly breakdown)
