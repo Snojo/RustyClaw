@@ -11,6 +11,7 @@
 //! The sandbox auto-detects available options and picks the strongest.
 
 use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
 
 // ── Sandbox Capabilities Detection ──────────────────────────────────────────
 
@@ -529,7 +530,7 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
                         .map_err(|e| format!("Failed to add read rule for {}: {}", path_str, e))?;
                 }
                 Err(e) => {
-                    eprintln!("[sandbox] Warning: Cannot open {} for Landlock: {}", path_str, e);
+                    warn!(path = %path_str, error = %e, "Cannot open path for Landlock read rule");
                 }
             }
         }
@@ -546,7 +547,7 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
                         .map_err(|e| format!("Failed to add rw rule for {}: {}", path_str, e))?;
                 }
                 Err(e) => {
-                    eprintln!("[sandbox] Warning: Cannot open {} for Landlock: {}", path_str, e);
+                    warn!(path = %path_str, error = %e, "Cannot open path for Landlock rw rule");
                 }
             }
         }
@@ -581,9 +582,10 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
                         })?;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[sandbox] Warning: Cannot open {:?} for Landlock: {}",
-                        allowed_path, e
+                    warn!(
+                        path = ?allowed_path,
+                        error = %e,
+                        "Cannot open path for Landlock allow rule"
                     );
                 }
             }
@@ -595,9 +597,9 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
     // This is the key insight: Landlock denies by omission, not by explicit rule.
 
     if !policy.deny_read.is_empty() {
-        eprintln!(
-            "[sandbox] Landlock: {} path(s) denied by omission from allowlist",
-            policy.deny_read.len()
+        debug!(
+            denied_paths = policy.deny_read.len(),
+            "Landlock: paths denied by omission from allowlist"
         );
     }
 
@@ -606,10 +608,10 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
         .restrict_self()
         .map_err(|e| format!("Failed to apply Landlock restrictions: {}", e))?;
 
-    eprintln!(
-        "[sandbox] ✓ Landlock active: workspace={:?}, {} system paths allowed, credentials denied by omission",
-        policy.workspace,
-        system_read_paths.len() + system_rw_paths.len()
+    info!(
+        workspace = ?policy.workspace,
+        system_paths = system_read_paths.len() + system_rw_paths.len(),
+        "Landlock sandbox active"
     );
 
     Ok(())
@@ -639,32 +641,32 @@ pub fn run_sandboxed(
     // Validate mode is available
     match effective_mode {
         SandboxMode::Bubblewrap if !caps.bubblewrap => {
-            eprintln!("[sandbox] Bubblewrap not available, falling back to path validation");
+            warn!("Bubblewrap not available, falling back to path validation");
             return run_with_path_validation(command, policy);
         }
         SandboxMode::Landlock if !caps.landlock => {
-            eprintln!("[sandbox] Landlock not available, falling back to path validation");
+            warn!("Landlock not available, falling back to path validation");
             return run_with_path_validation(command, policy);
         }
         SandboxMode::LandlockBwrap if !caps.landlock || !caps.bubblewrap => {
-            eprintln!("[sandbox] Landlock+Bubblewrap not fully available");
+            warn!("Landlock+Bubblewrap not fully available");
             if caps.landlock {
-                eprintln!("[sandbox] Falling back to Landlock only");
+                debug!("Falling back to Landlock only");
                 return run_with_path_validation(command, policy);
             } else if caps.bubblewrap {
-                eprintln!("[sandbox] Falling back to Bubblewrap only");
+                debug!("Falling back to Bubblewrap only");
                 return run_with_bubblewrap(command, policy);
             } else {
-                eprintln!("[sandbox] Falling back to path validation");
+                debug!("Falling back to path validation");
                 return run_with_path_validation(command, policy);
             }
         }
         SandboxMode::Docker if !caps.docker => {
-            eprintln!("[sandbox] Docker not available, falling back to path validation");
+            warn!("Docker not available, falling back to path validation");
             return run_with_path_validation(command, policy);
         }
         SandboxMode::MacOSSandbox if !caps.macos_sandbox => {
-            eprintln!("[sandbox] macOS sandbox not available, falling back to path validation");
+            warn!("macOS sandbox not available, falling back to path validation");
             return run_with_path_validation(command, policy);
         }
         _ => {}
@@ -784,9 +786,9 @@ fn run_with_path_validation(command: &str, policy: &SandboxPolicy) -> Result<std
 
     // Log warning if no paths detected (can't guarantee safety)
     if paths.is_empty() {
-        eprintln!(
-            "[sandbox] Warning: PathValidation mode cannot detect dynamic paths in: {}",
-            &command[..command.len().min(50)]
+        warn!(
+            command_preview = &command[..command.len().min(50)],
+            "PathValidation mode cannot detect dynamic paths in command"
         );
     }
 
@@ -959,15 +961,10 @@ fn run_with_landlock_bwrap(command: &str, policy: &SandboxPolicy) -> Result<std:
         }
     }
 
-    eprintln!(
-        "[sandbox] ✓ Landlock+Bubblewrap: defense-in-depth (namespace + kernel LSM)"
-    );
-    eprintln!(
-        "[sandbox]   - Bubblewrap: {} denied paths unmounted",
-        policy.deny_read.len() + policy.deny_exec.len()
-    );
-    eprintln!(
-        "[sandbox]   - Landlock: kernel-level enforcement active"
+    info!(
+        mode = "Landlock+Bubblewrap",
+        denied_paths = policy.deny_read.len() + policy.deny_exec.len(),
+        "Defense-in-depth sandbox active"
     );
 
     proc.output()
@@ -1060,10 +1057,12 @@ fn run_with_docker(command: &str, policy: &SandboxPolicy) -> Result<std::process
     docker_args.push("-c".to_string());
     docker_args.push(command.to_string());
 
-    eprintln!("[sandbox] ✓ Docker container: isolated execution (cross-platform)");
-    eprintln!("[sandbox]   - Memory: 2GB, CPU: 1.0, User: UID 1000");
-    eprintln!("[sandbox]   - Workspace: {} ({})", workspace_str,
-              if workspace_denied { "blocked" } else { "mounted" });
+    info!(
+        mode = "Docker",
+        workspace = %workspace_str,
+        workspace_blocked = workspace_denied,
+        "Docker container sandbox active"
+    );
 
     // Execute docker command
     std::process::Command::new("docker")
