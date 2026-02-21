@@ -10,6 +10,7 @@
 use ipnetwork::IpNetwork;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
+use tracing::warn;
 
 /// SSRF validator with configurable blocked CIDR ranges
 #[derive(Debug, Clone)]
@@ -144,9 +145,11 @@ impl SsrfValidator {
         if ip_addrs.len() != recheck_ips.len()
             || !ip_addrs.iter().all(|ip| recheck_ips.contains(ip))
         {
-            eprintln!(
-                "[Security] Warning: DNS resolution changed between checks for '{}': {:?} -> {:?}",
-                host, ip_addrs, recheck_ips
+            warn!(
+                host = %host,
+                initial_ips = ?ip_addrs,
+                recheck_ips = ?recheck_ips,
+                "DNS resolution changed between checks — possible DNS rebinding"
             );
             // Allow it but log the warning - legitimate round-robin DNS can cause this
         }

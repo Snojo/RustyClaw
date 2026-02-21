@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::providers;
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use tracing::warn;
 
 use std::path::PathBuf;
 
@@ -99,9 +100,9 @@ impl ModelContext {
         });
 
         if api_key.is_none() && providers::secret_key_for_provider(&provider).is_some() {
-            eprintln!(
-                "⚠ No API key found for provider '{}' — model calls will likely fail",
-                provider,
+            warn!(
+                provider = %provider,
+                "No API key found for provider — model calls will likely fail"
             );
         }
 
@@ -133,9 +134,9 @@ impl ModelContext {
         });
 
         if api_key.is_none() && providers::secret_key_for_provider(&provider).is_some() {
-            eprintln!(
-                "⚠ No API key provided for provider '{}' — model calls will likely fail",
-                provider,
+            warn!(
+                provider = %provider,
+                "No API key provided for provider — model calls will likely fail"
             );
         }
 

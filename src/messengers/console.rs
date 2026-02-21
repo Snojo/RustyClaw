@@ -3,6 +3,7 @@
 use super::{Message, Messenger};
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::debug;
 
 /// Console messenger that prints to stdout (useful for testing/debugging)
 pub struct ConsoleMessenger {
@@ -31,7 +32,7 @@ impl Messenger for ConsoleMessenger {
 
     async fn initialize(&mut self) -> Result<()> {
         self.connected = true;
-        eprintln!("[ConsoleMessenger] Initialized");
+        debug!(name = %self.name, "ConsoleMessenger initialized");
         Ok(())
     }
 
@@ -51,7 +52,7 @@ impl Messenger for ConsoleMessenger {
 
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
-        eprintln!("[ConsoleMessenger] Disconnected");
+        debug!(name = %self.name, "ConsoleMessenger disconnected");
         Ok(())
     }
 }
