@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
+use tracing::{debug, warn, instrument};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -115,24 +116,32 @@ fn detect_service_manager() -> &'static str {
 // ── 1. pkg_manage ───────────────────────────────────────────────────────────
 
 /// Package management: install, uninstall, upgrade, search, list, info.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_pkg_manage(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
 
+    tracing::Span::current().record("action", action);
+
     let package = args.get("package").and_then(|v| v.as_str());
     let manager_override = args.get("manager").and_then(|v| v.as_str());
+
+    debug!(package, manager = manager_override, "Package management request");
 
     let (mgr, mgr_name) = if let Some(m) = manager_override {
         (m, m)
     } else {
         let (m, n) = detect_pkg_manager();
         if m.is_empty() {
+            warn!("No supported package manager found");
             return Err("No supported package manager found on this system".to_string());
         }
         (m, n)
     };
+
+    debug!(manager = mgr_name, "Using package manager");
 
     match action {
         "install" => {
@@ -308,13 +317,16 @@ pub fn exec_pkg_manage(args: &Value, _workspace_dir: &Path) -> Result<String, St
 // ── 2. net_info ─────────────────────────────────────────────────────────────
 
 /// Network information: interfaces, connections, routing, DNS, and diagnostics.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_net_info(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
 
+    tracing::Span::current().record("action", action);
     let target = args.get("target").and_then(|v| v.as_str());
+    debug!(target, "Network info request");
 
     match action {
         "interfaces" => {
@@ -486,13 +498,16 @@ pub fn exec_net_info(args: &Value, _workspace_dir: &Path) -> Result<String, Stri
 // ── 3. net_scan ─────────────────────────────────────────────────────────────
 
 /// Network scanning: nmap, tcpdump, port checks, and lightweight alternatives.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_net_scan(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
 
+    tracing::Span::current().record("action", action);
     let target = args.get("target").and_then(|v| v.as_str());
+    debug!(target, "Network scan request");
 
     match action {
         "nmap" => {
@@ -711,14 +726,17 @@ pub fn exec_net_scan(args: &Value, _workspace_dir: &Path) -> Result<String, Stri
 // ── 4. service_manage ───────────────────────────────────────────────────────
 
 /// Manage system services: start, stop, restart, status, enable, disable, list.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_service_manage(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
 
+    tracing::Span::current().record("action", action);
     let service = args.get("service").and_then(|v| v.as_str());
     let init = detect_service_manager();
+    debug!(service, init_system = init, "Service management request");
 
     match action {
         "list" => {
@@ -889,13 +907,16 @@ pub fn exec_service_manage(args: &Value, _workspace_dir: &Path) -> Result<String
 // ── 5. user_manage ──────────────────────────────────────────────────────────
 
 /// User and group management: list users, groups, add/remove users, manage sudoers.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_user_manage(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
 
+    tracing::Span::current().record("action", action);
     let name = args.get("name").and_then(|v| v.as_str());
+    debug!(name, "User management request");
 
     match action {
         "whoami" => {
@@ -1033,11 +1054,14 @@ pub fn exec_user_manage(args: &Value, _workspace_dir: &Path) -> Result<String, S
 // ── 6. firewall ─────────────────────────────────────────────────────────────
 
 /// Firewall management: view rules, allow/deny ports, enable/disable.
+#[instrument(skip(args, _workspace_dir), fields(action))]
 pub fn exec_firewall(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
         .ok_or("Missing required parameter: action")?;
+
+    tracing::Span::current().record("action", action);
 
     // Detect firewall backend
     let backend = if cfg!(target_os = "macos") {
@@ -1053,6 +1077,8 @@ pub fn exec_firewall(args: &Value, _workspace_dir: &Path) -> Result<String, Stri
     } else {
         "unknown"
     };
+
+    debug!(backend, "Firewall management request");
 
     match action {
         "status" => {

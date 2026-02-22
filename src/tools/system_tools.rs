@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
+use tracing::{debug, warn, instrument};
 
 use super::helpers::{resolve_path, expand_tilde};
 
@@ -41,6 +42,7 @@ fn sh(script: &str) -> Result<String, String> {
 // ── 1. disk_usage ───────────────────────────────────────────────────────────
 
 /// Scan disk usage for a directory tree, returning the largest entries.
+#[instrument(skip(args, workspace_dir))]
 pub fn exec_disk_usage(args: &Value, workspace_dir: &Path) -> Result<String, String> {
     let path_str = args
         .get("path")
@@ -54,6 +56,8 @@ pub fn exec_disk_usage(args: &Value, workspace_dir: &Path) -> Result<String, Str
         .get("top")
         .and_then(|v| v.as_u64())
         .unwrap_or(20) as usize;
+
+    debug!(path = path_str, depth, top_n, "Disk usage scan");
 
     let target = if path_str.starts_with('~') || path_str.starts_with('/') {
         expand_tilde(path_str)
@@ -237,11 +241,14 @@ fn classify_entry(name: &str, path: &Path) -> &'static str {
 // ── 3. system_monitor ───────────────────────────────────────────────────────
 
 /// Return current CPU, memory, and top-process information.
+#[instrument(skip(args, _workspace_dir))]
 pub fn exec_system_monitor(args: &Value, _workspace_dir: &Path) -> Result<String, String> {
     let metric = args
         .get("metric")
         .and_then(|v| v.as_str())
         .unwrap_or("all");
+
+    debug!(metric, "System monitor request");
 
     let mut result = serde_json::Map::new();
 
@@ -741,6 +748,7 @@ pub fn exec_clipboard(args: &Value, _workspace_dir: &Path) -> Result<String, Str
 // ── 10. audit_sensitive ─────────────────────────────────────────────────────
 
 /// Scan files for potentially sensitive data patterns.
+#[instrument(skip(args, workspace_dir))]
 pub fn exec_audit_sensitive(args: &Value, workspace_dir: &Path) -> Result<String, String> {
     let path_str = args
         .get("path")
@@ -750,6 +758,8 @@ pub fn exec_audit_sensitive(args: &Value, workspace_dir: &Path) -> Result<String
         .get("max_files")
         .and_then(|v| v.as_u64())
         .unwrap_or(500) as usize;
+
+    debug!(path = path_str, max_files, "Auditing for sensitive data");
 
     let target = if path_str.starts_with('~') || path_str.starts_with('/') {
         expand_tilde(path_str)
@@ -881,6 +891,7 @@ fn content_unused(_: &[Value]) {}
 // ── 11. secure_delete ───────────────────────────────────────────────────────
 
 /// Securely overwrite and delete a file or directory.
+#[instrument(skip(args, workspace_dir))]
 pub fn exec_secure_delete(args: &Value, workspace_dir: &Path) -> Result<String, String> {
     let path_str = args
         .get("path")
@@ -894,6 +905,11 @@ pub fn exec_secure_delete(args: &Value, workspace_dir: &Path) -> Result<String, 
         .get("confirm")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    debug!(path = path_str, passes, confirm, "Secure delete request");
+    if !confirm {
+        warn!("Secure delete requested without confirmation");
+    }
 
     let target = if path_str.starts_with('~') || path_str.starts_with('/') {
         expand_tilde(path_str)
