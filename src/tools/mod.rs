@@ -5,6 +5,8 @@
 //! native schema (OpenAI function-calling, Anthropic tool-use, Google
 //! function declarations).
 
+use tracing::{debug, warn, instrument};
+
 mod helpers;
 mod file;
 mod runtime;
@@ -1040,12 +1042,19 @@ pub fn is_user_prompt_tool(name: &str) -> bool {
 }
 
 /// Find a tool by name and execute it with the given arguments.
+#[instrument(skip(args, workspace_dir), fields(tool = name))]
 pub fn execute_tool(name: &str, args: &Value, workspace_dir: &Path) -> Result<String, String> {
+    debug!("Executing tool");
     for tool in all_tools() {
         if tool.name == name {
-            return (tool.execute)(args, workspace_dir);
+            let result = (tool.execute)(args, workspace_dir);
+            if result.is_err() {
+                warn!(error = ?result.as_ref().err(), "Tool execution failed");
+            }
+            return result;
         }
     }
+    warn!(tool = name, "Unknown tool requested");
     Err(format!("Unknown tool: {}", name))
 }
 
