@@ -290,60 +290,59 @@ pub fn process_params() -> Vec<ToolParam> {
     ]
 }
 
-pub fn memory_search_params() -> Vec<ToolParam> {
+pub fn qmd_search_params() -> Vec<ToolParam> {
     vec![
         ToolParam {
             name: "query".into(),
-            description: "Search query for finding relevant memory content.".into(),
+            description: "Search query for finding relevant content in the knowledge vault.".into(),
             param_type: "string".into(),
             required: true,
         },
         ToolParam {
-            name: "maxResults".into(),
+            name: "limit".into(),
             description: "Maximum number of results to return. Default: 5.".into(),
             param_type: "integer".into(),
             required: false,
         },
         ToolParam {
-            name: "minScore".into(),
-            description: "Minimum relevance score threshold (0.0-1.0). Default: 0.1.".into(),
-            param_type: "number".into(),
-            required: false,
-        },
-        ToolParam {
-            name: "recencyBoost".into(),
-            description: "Enable recency weighting to boost recent memories. Default: true.".into(),
-            param_type: "boolean".into(),
-            required: false,
-        },
-        ToolParam {
-            name: "halfLifeDays".into(),
-            description: "Half-life for temporal decay in days. Lower values favor recent memories more strongly. Default: 30.".into(),
-            param_type: "number".into(),
+            name: "collection".into(),
+            description: "Search within a specific collection (e.g. 'daily', 'tacit', 'projects'). Omit to search all.".into(),
+            param_type: "string".into(),
             required: false,
         },
     ]
 }
 
-pub fn memory_get_params() -> Vec<ToolParam> {
+pub fn qmd_deep_search_params() -> Vec<ToolParam> {
     vec![
         ToolParam {
-            name: "path".into(),
-            description: "Path to the memory file (MEMORY.md or memory/*.md).".into(),
+            name: "query".into(),
+            description: "Search query for deep search with LLM re-ranking.".into(),
             param_type: "string".into(),
             required: true,
         },
         ToolParam {
-            name: "from".into(),
-            description: "Starting line number (1-indexed). Default: 1.".into(),
+            name: "limit".into(),
+            description: "Maximum number of results to return. Default: 5.".into(),
             param_type: "integer".into(),
             required: false,
         },
         ToolParam {
-            name: "lines".into(),
-            description: "Number of lines to read. Default: entire file.".into(),
-            param_type: "integer".into(),
+            name: "collection".into(),
+            description: "Search within a specific collection. Omit to search all.".into(),
+            param_type: "string".into(),
             required: false,
+        },
+    ]
+}
+
+pub fn qmd_get_params() -> Vec<ToolParam> {
+    vec![
+        ToolParam {
+            name: "path".into(),
+            description: "Path to the document to retrieve from the knowledge vault.".into(),
+            param_type: "string".into(),
+            required: true,
         },
     ]
 }

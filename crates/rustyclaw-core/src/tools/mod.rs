@@ -12,7 +12,7 @@ mod helpers;
 mod file;
 mod runtime;
 mod web;
-mod memory_tools;
+mod qmd_tools;
 mod cron_tool;
 mod sessions_tools;
 mod patch;
@@ -56,7 +56,7 @@ use runtime::{exec_execute_command, exec_process};
 use web::{exec_web_fetch, exec_web_search};
 
 // Memory operations
-use memory_tools::{exec_memory_search, exec_memory_get};
+use qmd_tools::{exec_qmd_search, exec_qmd_deep_search, exec_qmd_get};
 
 // Cron operations
 use cron_tool::exec_cron;
@@ -205,8 +205,9 @@ pub fn tool_summary(name: &str) -> &'static str {
         "web_fetch" => "Fetch content from URLs",
         "web_search" => "Search the web",
         "process" => "Manage background processes",
-        "memory_search" => "Search agent memory files",
-        "memory_get" => "Read agent memory files",
+        "qmd_search" => "Search knowledge vault (hybrid keyword + semantic)",
+        "qmd_deep_search" => "Deep search vault with LLM re-ranking",
+        "qmd_get" => "Retrieve document from knowledge vault",
         "cron" => "Manage scheduled jobs",
         "sessions_list" => "List active sessions",
         "sessions_spawn" => "Spawn sub-agent sessions",
@@ -292,8 +293,9 @@ pub fn all_tools() -> Vec<&'static ToolDef> {
         &WEB_FETCH,
         &WEB_SEARCH,
         &PROCESS,
-        &MEMORY_SEARCH,
-        &MEMORY_GET,
+        &QMD_SEARCH,
+        &QMD_DEEP_SEARCH,
+        &QMD_GET,
         &CRON,
         &SESSIONS_LIST,
         &SESSIONS_SPAWN,
@@ -452,22 +454,30 @@ pub static PROCESS: ToolDef = ToolDef {
     execute: exec_process,
 };
 
-pub static MEMORY_SEARCH: ToolDef = ToolDef {
-    name: "memory_search",
-    description: "Semantically search MEMORY.md and memory/*.md files for relevant information. \
+pub static QMD_SEARCH: ToolDef = ToolDef {
+    name: "qmd_search",
+    description: "Search the knowledge vault using hybrid search (keyword + semantic). \
                   Use before answering questions about prior work, decisions, dates, people, \
-                  preferences, or todos. Returns matching snippets with file path and line numbers.",
+                  preferences, or todos. Returns matching snippets ranked by relevance.",
     parameters: vec![],
-    execute: exec_memory_search,
+    execute: exec_qmd_search,
 };
 
-pub static MEMORY_GET: ToolDef = ToolDef {
-    name: "memory_get",
-    description: "Read content from a memory file (MEMORY.md or memory/*.md). \
-                  Use after memory_search to get full context around a snippet. \
-                  Supports optional line range for large files.",
+pub static QMD_DEEP_SEARCH: ToolDef = ToolDef {
+    name: "qmd_deep_search",
+    description: "Deep search the knowledge vault with LLM re-ranking for highest relevance. \
+                  Use when qmd_search results aren't specific enough or when you need the most \
+                  relevant results for a complex query. Slower but more accurate than qmd_search.",
     parameters: vec![],
-    execute: exec_memory_get,
+    execute: exec_qmd_deep_search,
+};
+
+pub static QMD_GET: ToolDef = ToolDef {
+    name: "qmd_get",
+    description: "Retrieve a specific document from the knowledge vault by path. \
+                  Use after qmd_search to get the full content of a matched document.",
+    parameters: vec![],
+    execute: exec_qmd_get,
 };
 
 pub static CRON: ToolDef = ToolDef {
@@ -977,8 +987,9 @@ fn resolve_params(tool: &ToolDef) -> Vec<ToolParam> {
         "web_fetch" => web_fetch_params(),
         "web_search" => web_search_params(),
         "process" => process_params(),
-        "memory_search" => memory_search_params(),
-        "memory_get" => memory_get_params(),
+        "qmd_search" => qmd_search_params(),
+        "qmd_deep_search" => qmd_deep_search_params(),
+        "qmd_get" => qmd_get_params(),
         "cron" => cron_params(),
         "sessions_list" => sessions_list_params(),
         "sessions_spawn" => sessions_spawn_params(),
@@ -1414,7 +1425,7 @@ mod tests {
     #[test]
     fn test_openai_format() {
         let tools = tools_openai();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 62);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read_file");
         assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
@@ -1423,7 +1434,7 @@ mod tests {
     #[test]
     fn test_anthropic_format() {
         let tools = tools_anthropic();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 62);
         assert_eq!(tools[0]["name"], "read_file");
         assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
@@ -1431,7 +1442,7 @@ mod tests {
     #[test]
     fn test_google_format() {
         let tools = tools_google();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 62);
         assert_eq!(tools[0]["name"], "read_file");
     }
 
@@ -1556,52 +1567,57 @@ mod tests {
         assert!(params.iter().any(|p| p.name == "yieldMs" && !p.required));
     }
 
-    // ── memory_search ───────────────────────────────────────────────
+    // ── qmd_search ──────────────────────────────────────────────
 
     #[test]
-    fn test_memory_search_params_defined() {
-        let params = memory_search_params();
-        assert_eq!(params.len(), 5);
-        assert!(params.iter().any(|p| p.name == "query" && p.required));
-        assert!(params.iter().any(|p| p.name == "maxResults" && !p.required));
-        assert!(params.iter().any(|p| p.name == "minScore" && !p.required));
-        assert!(params.iter().any(|p| p.name == "recencyBoost" && !p.required));
-        assert!(params.iter().any(|p| p.name == "halfLifeDays" && !p.required));
-    }
-
-    #[test]
-    fn test_memory_search_missing_query() {
-        let args = json!({});
-        let result = exec_memory_search(&args, ws());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter"));
-    }
-
-    // ── memory_get ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_memory_get_params_defined() {
-        let params = memory_get_params();
+    fn test_qmd_search_params_defined() {
+        let params = qmd_search_params();
         assert_eq!(params.len(), 3);
-        assert!(params.iter().any(|p| p.name == "path" && p.required));
-        assert!(params.iter().any(|p| p.name == "from" && !p.required));
-        assert!(params.iter().any(|p| p.name == "lines" && !p.required));
+        assert!(params.iter().any(|p| p.name == "query" && p.required));
+        assert!(params.iter().any(|p| p.name == "limit" && !p.required));
+        assert!(params.iter().any(|p| p.name == "collection" && !p.required));
     }
 
     #[test]
-    fn test_memory_get_missing_path() {
+    fn test_qmd_search_missing_query() {
         let args = json!({});
-        let result = exec_memory_get(&args, ws());
+        let result = exec_qmd_search(&args, ws());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
 
+    // ── qmd_deep_search ────────────────────────────────────────
+
     #[test]
-    fn test_memory_get_invalid_path() {
-        let args = json!({ "path": "../etc/passwd" });
-        let result = exec_memory_get(&args, ws());
+    fn test_qmd_deep_search_params_defined() {
+        let params = qmd_deep_search_params();
+        assert_eq!(params.len(), 3);
+        assert!(params.iter().any(|p| p.name == "query" && p.required));
+    }
+
+    #[test]
+    fn test_qmd_deep_search_missing_query() {
+        let args = json!({});
+        let result = exec_qmd_deep_search(&args, ws());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a valid memory file"));
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    // ── qmd_get ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_qmd_get_params_defined() {
+        let params = qmd_get_params();
+        assert_eq!(params.len(), 1);
+        assert!(params.iter().any(|p| p.name == "path" && p.required));
+    }
+
+    #[test]
+    fn test_qmd_get_missing_path() {
+        let args = json!({});
+        let result = exec_qmd_get(&args, ws());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
     }
 
     // ── cron ────────────────────────────────────────────────────────
@@ -1766,7 +1782,7 @@ mod tests {
         assert!(is_secrets_tool("secrets_get"));
         assert!(is_secrets_tool("secrets_store"));
         assert!(!is_secrets_tool("read_file"));
-        assert!(!is_secrets_tool("memory_get"));
+        assert!(!is_secrets_tool("qmd_search"));
     }
 
     #[test]
