@@ -24,8 +24,6 @@
   <a href="#architecture">Architecture</a>
 </p>
 
- pu---
-
 ## What is RustyClaw?
 
 RustyClaw is an **agentic AI operating system** — a complete runtime for deploying, orchestrating, and securing AI agents. It provides everything agents need: tools, memory, isolation, scheduling, multi-agent coordination, and secure credential management.
