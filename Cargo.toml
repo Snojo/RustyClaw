@@ -21,8 +21,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("signal"))
 # ── Shared dependency versions ───────────────────────────────────────────────
 [workspace.dependencies]
 # Internal crates
-rustyclaw-core = { path = "crates/rustyclaw-core" }
-rustyclaw-tui = { path = "crates/rustyclaw-tui" }
+rustyclaw-core = { path = "crates/rustyclaw-core", version = "0.2.0" }
+rustyclaw-tui = { path = "crates/rustyclaw-tui", version = "0.2.0" }
 
 # Configuration and serialization
 serde = { version = "1.0", features = ["derive"] }
