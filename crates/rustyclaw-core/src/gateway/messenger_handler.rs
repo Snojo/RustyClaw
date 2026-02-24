@@ -499,6 +499,7 @@ fn build_messenger_system_prompt(config: &Config, messenger_type: &str, msg: &Me
     let workspace_ctx = WorkspaceContext::with_config(
         config.workspace_dir(),
         config.workspace_context.clone(),
+        config.personality.clone(),  // PARA vault personality
     );
     let workspace_prompt = workspace_ctx.build_context(session_type);
 

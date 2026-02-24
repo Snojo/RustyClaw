@@ -21,6 +21,13 @@ use_secrets = true
 # tls_cert = "/path/to/cert.pem"
 # tls_key = "/path/to/key.pem"
 
+# PARA vault personality (optional — overrides SOUL.md when set)
+# Loads all .md files from these directories into the system prompt.
+# [personality]
+# soul_dir = "Tacit/soul/"
+# operational_dir = "Tacit/operational/"
+# daily_dir = "Daily/"
+
 # Messenger configurations
 # [[messengers]]
 # name = "slack"

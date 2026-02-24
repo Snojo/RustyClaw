@@ -5,6 +5,7 @@
 //! (MEMORY.md), and follow workspace conventions (AGENTS.md, TOOLS.md).
 
 use chrono::{Duration, Local};
+use crate::config::PersonalityConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -170,6 +171,7 @@ const WORKSPACE_FILES: &[WorkspaceFile] = &[
 pub struct WorkspaceContext {
     workspace_dir: PathBuf,
     config: WorkspaceContextConfig,
+    personality: PersonalityConfig,
 }
 
 impl WorkspaceContext {
@@ -178,16 +180,19 @@ impl WorkspaceContext {
         Self {
             workspace_dir,
             config: WorkspaceContextConfig::default(),
+            personality: PersonalityConfig::default(),
         }
     }
 
     /// Create a workspace context with custom config.
-    pub fn with_config(workspace_dir: PathBuf, config: WorkspaceContextConfig) -> Self {
+    pub fn with_config(workspace_dir: PathBuf, config: WorkspaceContextConfig, personality: PersonalityConfig) -> Self {
         Self {
             workspace_dir,
             config,
+            personality,
         }
     }
+
 
     /// Check if a file should be included based on config and session type.
     fn should_include(&self, file: &WorkspaceFile, session_type: SessionType) -> bool {
@@ -195,10 +200,15 @@ impl WorkspaceContext {
         if file.main_only && session_type != SessionType::Main {
             return false;
         }
-
         // Check config field
         match file.config_field {
-            ConfigField::Soul => self.config.inject_soul,
+            // If soul_dir is configured, skip SOUL.md to avoid duplication
+            ConfigField::Soul => {
+                if self.personality.soul_dir.is_some() {
+                    return false;
+                }
+                self.config.inject_soul
+            }
             ConfigField::Agents => self.config.inject_agents,
             ConfigField::Tools => self.config.inject_tools,
             ConfigField::Identity => self.config.inject_identity,
@@ -234,6 +244,18 @@ impl WorkspaceContext {
                 }
             }
         }
+        // Load personality from Tacit/ directories (takes precedence over SOUL.md if configured)
+        if let Some(ref soul_dir) = self.personality.soul_dir {
+            if let Some(soul_section) = self.load_directory_files(soul_dir, "Personality") {
+                sections.push(soul_section);
+            }
+        }
+
+        if let Some(ref ops_dir) = self.personality.operational_dir {
+            if let Some(ops_section) = self.load_directory_files(ops_dir, "Operational Rules") {
+                sections.push(ops_section);
+            }
+        }
 
         // Add daily memory files for main session
         if session_type == SessionType::Main && self.config.inject_daily {
@@ -257,12 +279,21 @@ impl WorkspaceContext {
     fn load_daily_memory(&self) -> Option<String> {
         let today = Local::now().date_naive();
         let mut daily_sections = Vec::new();
-
+        // Use PARA daily_dir if configured, otherwise default to memory/
+        let daily_base = self.personality.daily_dir
+            .as_ref()
+            .map(|d| {
+                if d.is_absolute() {
+                    d.clone()
+                } else {
+                    self.workspace_dir.join(d)
+                }
+            })
+            .unwrap_or_else(|| self.workspace_dir.join("memory"));
         for i in 0..=self.config.daily_lookback_days {
             let date = today - Duration::days(i as i64);
-            let filename = format!("memory/{}.md", date.format("%Y-%m-%d"));
-            let path = self.workspace_dir.join(&filename);
-
+            let filename = format!("{}.md", date.format("%Y-%m-%d"));
+            let path = daily_base.join(&filename);
             if let Ok(content) = fs::read_to_string(&path) {
                 let content = content.trim();
                 if !content.is_empty() {
@@ -270,7 +301,6 @@ impl WorkspaceContext {
                 }
             }
         }
-
         if daily_sections.is_empty() {
             None
         } else {
@@ -278,6 +308,47 @@ impl WorkspaceContext {
                 "## Recent Daily Notes\n{}",
                 daily_sections.join("\n\n")
             ))
+        }
+    }
+
+    /// Load all .md files from a directory, sorted alphabetically.
+    /// Returns formatted sections with file name headers.
+    fn load_directory_files(&self, dir: &Path, section_header: &str) -> Option<String> {
+        let resolved = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            self.workspace_dir.join(dir)
+        };
+
+        if !resolved.is_dir() {
+            return None;
+        }
+
+        let mut entries: Vec<_> = fs::read_dir(&resolved)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+            })
+            .collect();
+
+        entries.sort_by_key(|e| e.file_name());
+
+        let mut sections = Vec::new();
+        for entry in entries {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                let content = content.trim();
+                if !content.is_empty() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    sections.push(format!("### {}\n{}", name, content));
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(format!("## {}\n{}", section_header, sections.join("\n\n")))
         }
     }
 
@@ -372,7 +443,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let ctx = WorkspaceContext::with_config(workspace.path().to_path_buf(), config);
+        let ctx = WorkspaceContext::with_config(workspace.path().to_path_buf(), config, PersonalityConfig::default());
 
         let prompt = ctx.build_context(SessionType::Main);
         assert!(prompt.is_empty());
@@ -387,7 +458,7 @@ mod tests {
             inject_memory: false, // Disabled
             ..Default::default()
         };
-        let ctx = WorkspaceContext::with_config(workspace.path().to_path_buf(), config);
+        let ctx = WorkspaceContext::with_config(workspace.path().to_path_buf(), config, PersonalityConfig::default());
 
         let prompt = ctx.build_context(SessionType::Main);
         assert!(prompt.contains("SOUL.md"));

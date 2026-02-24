@@ -105,6 +105,37 @@ pub struct Config {
     /// Workspace context injection configuration.
     #[serde(default)]
     pub workspace_context: WorkspaceContextConfig,
+    /// PARA vault personality configuration.
+    #[serde(default)]
+    pub personality: PersonalityConfig,
+}
+
+/// PARA vault personality configuration.
+///
+/// Enables loading personality and operational rules from directory trees
+/// instead of single files (SOUL.md, AGENTS.md). When set, files in these
+/// directories are loaded alphabetically and injected into the system prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersonalityConfig {
+    /// Directory containing soul/identity files.
+    /// All .md files loaded alphabetically into system prompt.
+    /// When set, takes precedence over SOUL.md for personality content.
+    /// Relative to workspace_dir or absolute.
+    #[serde(default)]
+    pub soul_dir: Option<PathBuf>,
+
+    /// Directory containing operational rules (delegation, permissions, cost awareness).
+    /// All .md files loaded alphabetically into system prompt.
+    /// Relative to workspace_dir or absolute.
+    #[serde(default)]
+    pub operational_dir: Option<PathBuf>,
+
+    /// Root directory for PARA daily notes.
+    /// When set, daily lookback reads from <daily_dir>/YYYY-MM-DD.md
+    /// instead of memory/YYYY-MM-DD.md.
+    /// Relative to workspace_dir or absolute.
+    #[serde(default)]
+    pub daily_dir: Option<PathBuf>,
 }
 
 /// Configuration for a messenger backend.
@@ -184,6 +215,7 @@ impl Default for Config {
             tls_key: None,
             memory_flush: MemoryFlushConfig::default(),
             workspace_context: WorkspaceContextConfig::default(),
+            personality: PersonalityConfig::default(),
         }
     }
 }
